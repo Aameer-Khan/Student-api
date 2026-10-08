@@ -28,11 +28,27 @@ def create_student():
             missing.append(field)
     if missing:
         return jsonify({"error": "Missing required fields", "missing": missing}), 400
-    student = Student(
-        name=data["name"],
-        email=data["email"],
-        age=data["age"]
-    )
+
+    errors = []
+
+    name = data["name"]
+    if not isinstance(name, str) or not name.strip() or len(name) > 100:
+        errors.append("name must be a non-empty string of at most 100 characters")
+
+    email = data["email"]
+    if not isinstance(email, str) or "@" not in email:
+        errors.append("email must be a valid email address")
+
+    age = data["age"]
+    if not isinstance(age, int) or age < 5 or age > 100:
+        errors.append("age must be a whole number between 5 and 100")
+
+    if errors:
+        return jsonify({"error": "Invalid data", "details": errors}), 400
+
+
+    student = Student(name=name, email=email, age=age)
+    
     db.session.add(student)
     db.session.commit()
 
