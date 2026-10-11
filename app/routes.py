@@ -66,7 +66,7 @@ def create_student():
         db.session.commit()
     except IntegrityError:
         db.session.rollback()
-        logger.error("IntegrityError: A student with this email already exists")
+        logger.warning("IntegrityError: A student with this email already exists")
         return jsonify({"error": "A student with this email already exists"}), 409
 
     logger.info("Created student %s", student.id)
@@ -119,3 +119,5 @@ def update_student(student_id):
     
     logger.info("Updated student %s", student.id)
     return jsonify(student.to_dict()), 200
+
+
