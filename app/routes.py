@@ -1,3 +1,5 @@
+import logging
+logger = logging.getLogger(__name__)
 from flask import Blueprint, jsonify, request
 from app.models import Student, db
 from sqlalchemy.exc import IntegrityError
@@ -64,8 +66,10 @@ def create_student():
         db.session.commit()
     except IntegrityError:
         db.session.rollback()
+        logger.error("IntegrityError: A student with this email already exists")
         return jsonify({"error": "A student with this email already exists"}), 409
 
+    logger.info("Created student %s", student.id)
     return jsonify(student.to_dict()), 201
 
 
@@ -73,6 +77,7 @@ def create_student():
 def get_student(student_id):
     student = db.session.get(Student, student_id)
     if student is None:
+        logger.warning("Attempted to retrieve non-existent student %s", student_id)
         return jsonify({"error": "Student not found"}), 404
     return jsonify(student.to_dict()), 200
 
@@ -84,6 +89,7 @@ def delete_student(student_id):
         return jsonify({"error": "Student not found"}), 404
     db.session.delete(student)
     db.session.commit()
+    logger.info("Deleted student %s", student_id)
     return "", 204
 
 @students_bp.route("/students/<int:student_id>", methods=["PATCH"])
@@ -110,4 +116,6 @@ def update_student(student_id):
         db.session.rollback()
         return jsonify({"error": "A student with this email already exists"}), 409
 
+    
+    logger.info("Updated student %s", student.id)
     return jsonify(student.to_dict()), 200
