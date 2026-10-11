@@ -1,3 +1,5 @@
+import logging
+import sys
 from dotenv import load_dotenv
 load_dotenv()
 from flask import Flask
@@ -13,6 +15,12 @@ from werkzeug.exceptions import HTTPException
 def create_app():
     app = Flask(__name__)
     app.config.from_object(Config)
+    logging.basicConfig(
+        level=app.config["LOG_LEVEL"],
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        stream=sys.stdout,
+    )
+    logging.getLogger("werkzeug").setLevel(app.config["LOG_LEVEL"])
     db.init_app(app)
     migrate = Migrate(app, db)
     app.register_blueprint(health_bp)
