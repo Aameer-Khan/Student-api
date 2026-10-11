@@ -1,5 +1,6 @@
 from flask import Blueprint, jsonify, request
 from app.models import Student, db
+from sqlalchemy.exc import IntegrityError
 
 health_bp = Blueprint("health", __name__)
 students_bp = Blueprint("students", __name__, url_prefix="/api/v1")
@@ -48,8 +49,12 @@ def create_student():
 
 
     student = Student(name=name, email=email, age=age)
-    
     db.session.add(student)
-    db.session.commit()
+    try:
+        db.session.commit()
+    except IntegrityError:
+        db.session.rollback()
+        return jsonify({"error": "A student with this email already exists"}), 409
 
     return jsonify(student.to_dict()), 201
+ 
