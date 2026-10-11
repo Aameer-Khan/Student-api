@@ -85,3 +85,29 @@ def delete_student(student_id):
     db.session.delete(student)
     db.session.commit()
     return "", 204
+
+@students_bp.route("/students/<int:student_id>", methods=["PATCH"])
+def update_student(student_id):
+    student = db.session.get(Student, student_id)
+    if student is None:
+        return jsonify({"error": "Student not found"}), 404
+
+    data = request.get_json()
+    errors = validate_student_fields(data)
+    if errors:
+        return jsonify({"error": "Invalid data", "details": errors}), 400
+
+    if "name" in data:
+        student.name = data["name"]
+    if "email" in data:
+        student.email = data["email"]
+    if "age" in data:
+        student.age = data["age"]
+
+    try:
+        db.session.commit()
+    except IntegrityError:
+        db.session.rollback()
+        return jsonify({"error": "A student with this email already exists"}), 409
+
+    return jsonify(student.to_dict()), 200
