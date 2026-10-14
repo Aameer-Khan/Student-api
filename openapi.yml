@@ -1,0 +1,187 @@
+openapi: 3.0.3
+info:
+  title: Student API
+  version: 1.0.0
+  description: A simple REST API to manage student records.
+
+paths:
+  /healthcheck:
+    get:
+      summary: Check that the service is healthy
+      tags: [ Health ]
+      responses:
+        "200":
+          description: The service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+  /api/v1/students:
+    get:
+      tags: [ Students ]
+      summary: List all students
+      responses:
+        "200":
+          description: A list of students (empty if there are none)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Student"
+    post:
+      tags: [ Students ]
+      summary: Create a new student
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Student"
+      responses:
+        "201":
+          description: Student created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Student"
+        "400":
+          description: Missing fields, invalid values, or malformed JSON
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: student with the same email already exists
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "415":
+          description: The request body must be JSON
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /api/v1/students/{student_id}:
+    parameters:
+    - name: student_id
+      in: path
+      required: true
+      description: The student's ID
+      schema:
+        type: integer
+    get:
+      tags: [ Students ]
+      summary: Get one student
+      responses:
+        "200":
+          description: The student
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Student"
+        "404":
+          description: No student with this ID
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+    patch:
+      tags: [ Students ]
+      summary: Update some fields of a student
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StudentUpdate"
+      responses:
+        "200":
+          description: The updated student
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Student"
+        "404":
+          description: No student with this ID
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: student with the same email already exists
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "415":
+          description: The request body must be JSON
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+    delete:
+      tags: [ Students ]
+      summary: Delete a student
+      responses:
+        "204":
+          description: Student deleted
+        "404":
+          description: No student with this ID
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+components:
+  schemas:
+    Student:
+      type: object
+      required: [ name, email, age ]
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        name:
+          type: string
+          maxLength: 100
+        email:
+          type: string
+          format: email
+        age:
+          type: integer
+          minimum: 5
+          maximum: 100
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+        missing:
+          type: array
+          items:
+            type: string
+        details:
+          type: array
+          items:
+            type: string
+    StudentUpdate:
+      type: object
+      properties:
+        name:
+          $ref: "#/components/schemas/Student/properties/name"
+        email:
+          $ref: "#/components/schemas/Student/properties/email"
+        age:
+          $ref: "#/components/schemas/Student/properties/age"
