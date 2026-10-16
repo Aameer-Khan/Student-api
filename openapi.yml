@@ -108,6 +108,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Student"
+        "400":
+          description: invalid values, or malformed JSON
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "404":
           description: No student with this ID
           content:

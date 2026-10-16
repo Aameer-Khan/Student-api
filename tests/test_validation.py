@@ -23,3 +23,7 @@ def test_age_5_is_accepted():
 def test_age_100_is_accepted():
     errors = validate_student_fields({"age": 100})
     assert errors == []
+
+def test_age_as_text_is_rejected():
+    errors = validate_student_fields({"age": "twenty"})
+    assert len(errors) == 1
