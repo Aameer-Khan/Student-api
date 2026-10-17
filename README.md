@@ -1,8 +1,8 @@
 # Student API
 
-A small REST API for managing student records, built with **Flask**, **SQLAlchemy** and **SQLite**.
+A small REST API for managing student records, built with **Flask** and **SQLAlchemy**. With **Docker Compose** it runs next to a **PostgreSQL** database. For quick local development without Docker, it can use **SQLite** instead.
 
-It supports creating, listing, reading, updating and deleting students. Every input is validated, duplicate emails are rejected, errors always come back as JSON, logs go to stdout, database migrations are versioned, and the whole API is described in an OpenAPI spec and covered by pytest tests.
+It supports creating, listing, reading, updating and deleting students. Every input is validated, duplicate emails are rejected, errors always come back as JSON, logs go to stdout, database migrations are versioned, the healthcheck tests the database connection, and the whole API is described in an OpenAPI spec and covered by pytest tests.
 
 This was built step by step as a learning project. The [Learning journey](#learning-journey) section at the end shows how it was built up.
 
@@ -13,35 +13,39 @@ This was built step by step as a learning project. The [Learning journey](#learn
 1. [Tech stack](#tech-stack)
 2. [Project structure](#project-structure)
 3. [Getting started](#getting-started)
-4. [Configuration](#configuration)
-5. [API reference](#api-reference)
-6. [Validation rules](#validation-rules)
-7. [Error responses](#error-responses)
-8. [Logging](#logging)
-9. [Database migrations](#database-migrations)
-10. [Testing](#testing)
-11. [Running with Docker](#running-with-docker)
-12. [Makefile commands](#makefile-commands)
-13. [Learning journey](#learning-journey)
+4. [Architecture](#architecture)
+5. [Make targets](#make-targets)
+6. [Configuration](#configuration)
+7. [API reference](#api-reference)
+8. [Healthcheck](#healthcheck)
+9. [Validation rules](#validation-rules)
+10. [Error responses](#error-responses)
+11. [Logging](#logging)
+12. [Database migrations](#database-migrations)
+13. [Testing](#testing)
+14. [Learning journey](#learning-journey)
 
 ---
 
 ## Tech stack
 
-| Tool                 | Used for                                                   |
-|----------------------|------------------------------------------------------------|
-| Python 3.12          | Language                                                   |
-| Flask 3.1            | Web framework: routing, requests and responses             |
-| Flask-SQLAlchemy     | Python classes used as database tables (the ORM)           |
-| Flask-Migrate        | Versioned database schema changes (built on Alembic)       |
-| SQLite               | The database: one file, no server needed                   |
-| python-dotenv        | Loads settings from a `.env` file                          |
-| pytest               | Automated tests                                            |
-| Gunicorn             | Production WSGI server (runs the app inside the container) |
-| Docker               | Container image (multi-stage build)                        |
-| OpenAPI 3.0          | Machine-readable API documentation (`openapi.yml`)         |
+| Tool                 | Used for                                                          |
+|----------------------|-------------------------------------------------------------------|
+| Python 3.12          | Language                                                          |
+| Flask 3.1            | Web framework: routing, requests and responses                    |
+| Flask-SQLAlchemy     | Python classes used as database tables (the ORM)                  |
+| Flask-Migrate        | Versioned database schema changes (built on Alembic)              |
+| PostgreSQL 17        | The database when running with Docker Compose (`postgres:17-alpine`) |
+| psycopg 3            | PostgreSQL driver used by SQLAlchemy (`postgresql+psycopg://`)    |
+| SQLite               | Database for local development and tests: one file, no server     |
+| python-dotenv        | Loads settings from a `.env` file                                 |
+| pytest               | Automated tests                                                   |
+| Gunicorn             | Production WSGI server (runs the app inside the container)        |
+| Docker               | Container image (multi-stage build, non-root user)                |
+| Docker Compose       | Runs the API and the database together                            |
+| OpenAPI 3.0          | Machine-readable API documentation (`openapi.yml`)                |
 
-The exact pinned versions are in [`requirements.txt`](requirements.txt). The reason for each package is explained in [docs/02-dependencies.md](docs/02-dependencies.md).
+The exact pinned versions are in [`requirements.txt`](requirements.txt). The reason for each of the original packages is explained in [docs/02-dependencies.md](docs/02-dependencies.md).
 
 ---
 
@@ -63,16 +67,19 @@ student-api/
 │   ├── test_health.py            ← healthcheck endpoint
 │   ├── test_students.py          ← the student endpoints, end to end
 │   └── test_validation.py        ← the validation helper on its own
+├── scripts/
+│   └── setup.sh                  ← checks for (and installs) make and Docker
 ├── docs/                         ← learning notes written during setup
 ├── openapi.yml                   ← OpenAPI 3.0 spec for every endpoint
 ├── Dockerfile                    ← multi-stage image build: builder → slim runtime
 ├── .dockerignore                 ← files kept out of the image (.env, .venv, tests…)
-├── Makefile                      ← shortcuts: install, migrate, run, test, docker-*
+├── docker-compose.yml            ← two services: db (PostgreSQL) and api
+├── Makefile                      ← shortcuts for Docker and local development
 ├── requirements.txt              ← pinned dependencies
 ├── .env.example                  ← template for .env: every setting with a working default
 ├── .env                          ← your local settings (not committed)
-├── instance/                     ← where the SQLite database file lives (not committed)
-└── .venv/                        ← virtual environment (not committed)
+├── instance/                     ← SQLite database file for local development (not committed)
+└── .venv/                        ← virtual environment for local development (not committed)
 ```
 
 ### How a request flows through the app
@@ -88,52 +95,40 @@ student-api/
 
 ### Prerequisites
 
-- **Git.** Check with `git --version`. It comes with the Xcode Command Line Tools on macOS.
-- **Python 3.12.** Check with `python3.12 --version`. On macOS: `brew install python@3.12`.
-- **make.** It comes with the Xcode Command Line Tools on macOS.
+| Tool                 | Why                                         | Check with       |
+|----------------------|---------------------------------------------|------------------|
+| **Git**              | To clone the repository                     | `git --version`  |
+| **Docker**           | Builds and runs the containers. The Docker Engine must be **running**. | `docker info` |
+| **make**             | Runs the shortcuts in the `Makefile`        | `make --version` |
 
-### 1. Clone the repository
+Docker Compose is included with Docker Desktop.
+
+#### `scripts/setup.sh`
+
+This script sets up the tools for you:
 
 ```bash
-git clone https://github.com/Aameer-Khan/Student-api.git
-cd Student-api
+./scripts/setup.sh
 ```
 
-### 2. Install dependencies
+It does three things, in order:
+
+1. **Checks for `make`** and installs it if it's missing. On macOS it uses `xcode-select --install`, and on Linux `apt-get install make`.
+2. **Checks for `docker`** and installs it if it's missing. On macOS it uses `brew install --cask docker`, which needs [Homebrew](https://brew.sh), and on Linux the official script from `get.docker.com`.
+3. **Checks that the Docker Engine is running.** If it isn't, it tells you to start Docker Desktop and run the script again.
+
+Each tool that is already installed is reported with ✔ and skipped, so it's safe to run the script any number of times.
+
+### Quick start (one command after setup)
 
 ```bash
-make install
-```
-
-This creates a virtual environment in `.venv/`, upgrades pip and installs everything from `requirements.txt`.
-
-### 3. Create your `.env` file
-
-The app won't start without a `DATABASE_URL`. Copy the example file:
-
-```bash
+git clone https://github.com/Aameer-Khan/Student-api.git && cd Student-api
+./scripts/setup.sh
 cp .env.example .env
+make docker-run
 ```
 
-The defaults work as they are. A relative SQLite path like `sqlite:///app.db` is created inside the `instance/` folder. See [Configuration](#configuration) for every setting.
-
-### 4. Create the database tables
-
-```bash
-make migrate
-```
-
-This runs every migration in `migrations/versions/`, which creates the `students` table.
-
-### 5. Run the server
-
-```bash
-make run
-```
-
-The API is now running at **http://localhost:5001**, with debug mode and auto-reload on.
-
-> **Why port 5001?** On macOS, port 5000 is taken by the AirPlay Receiver.
+`make docker-run` builds the API image, starts PostgreSQL and waits until it's healthy, applies the migrations, and then starts the API in the background. See [Make targets](#make-targets) for each step.
 
 Check that it's up:
 
@@ -141,26 +136,138 @@ Check that it's up:
 curl http://localhost:5001/healthcheck
 ```
 
-You should get `{"status": "ok"}`.
+You should get `{"status": "ok"}`, which means the API is running **and** can reach the database.
 
-### 6. Run the tests
+To stop everything:
 
 ```bash
-make test
+make down
 ```
+
+Your data is kept in the `pgdata` volume, so it's still there the next time you run `make docker-run`.
+
+> **Why port 5001?** On macOS, port 5000 is taken by the AirPlay Receiver. The Docker API and the local dev server (`make run`) both use 5001, so run only one of them at a time.
+
+### Local development (without Docker)
+
+To run the app directly on your machine against a SQLite file, you also need **Python 3.12**. Check with `python3.12 --version`, and on macOS install it with `brew install python@3.12`.
+
+```bash
+cp .env.example .env   # if you haven't already
+make install           # create .venv and install requirements.txt
+make migrate           # create the tables in instance/app.db
+make run               # dev server on http://localhost:5001, with debug and auto-reload
+make test              # run the test suite
+```
+
+The local targets use `DATABASE_URL` from `.env`, which is `sqlite:///app.db` by default.
+
+---
+
+## Architecture
+
+`docker compose` runs two services, defined in [`docker-compose.yml`](docker-compose.yml):
+
+```
+              your machine
+                   │
+           localhost:5001
+                   │
+ ┌─────────────────┼──────────── compose network (private) ───┐
+ │                 ▼                                           │
+ │   ┌──────────────────────────┐       ┌───────────────────┐  │
+ │   │ api                      │       │ db                │  │
+ │   │ student-api:<VERSION>    │──────▶│ postgres:17-alpine│  │
+ │   │ Gunicorn on port 5000    │ db:5432  port 5432        │  │
+ │   └──────────────────────────┘       └─────────┬─────────┘  │
+ │                                                │            │
+ └────────────────────────────────────────────────┼────────────┘
+                                                  ▼
+                                         volume: pgdata
+```
+
+- **A private network.** Compose puts both services on their own network. The API reaches the database at the hostname **`db`**, which is the service name, on port 5432.
+- **Only the API is published.** Its container port 5000 is mapped to **localhost:5001**. The database port is **not** published, so nothing outside the compose network can connect to PostgreSQL directly.
+- **Data lives in a named volume.** PostgreSQL stores its files in the volume **`pgdata`**. It survives `make down` and container rebuilds. To start over with an empty database, run `docker compose down -v`, which also deletes the volume.
+- **Startup order.** The `db` service has a healthcheck that runs `pg_isready` every 5 seconds. The `api` service has `depends_on: db: condition: service_healthy`, so the API only starts once PostgreSQL is accepting connections.
+- **Settings stay out of the image.** `.env` is excluded by `.dockerignore`. Compose reads `.env` and passes the values to the containers when they start. See [Configuration](#configuration).
+
+### The image
+
+The `Dockerfile` uses a **multi-stage build**:
+1. Dependencies are installed in a full `python:3.12` builder stage.
+2. Only the installed packages and the code are copied into a slim `python:3.12-slim` runtime image.
+
+The API is served by **Gunicorn** and runs as a **non-root user** (`appuser`). The image was about 290 MB at version 1.0.1, compared with 1.7 GB for a single-stage build.
+
+Images are tagged with semantic versions (`MAJOR.MINOR.PATCH`), currently **`1.1.0`**, and **never `latest`**. The version is set by `VERSION` in the `Makefile`, which passes it to Compose.
+
+> **Always use the `make` targets** to build and run with Docker. `docker-compose.yml` takes the image tag from `VERSION`, which only the Makefile sets. A plain `docker compose build` would leave the tag empty and fail.
+
+---
+
+## Make targets
+
+### Docker (API + PostgreSQL)
+
+| Target              | Depends on                   | What it does                                                                                       |
+|---------------------|------------------------------|----------------------------------------------------------------------------------------------------|
+| `make db-up`        | none                         | Starts the PostgreSQL container and waits until its healthcheck passes. Does nothing if it's already running. |
+| `make db-migrate`   | `db-up`                      | Applies the database migrations in a one-off API container. Does nothing if they're already applied. |
+| `make docker-build` | none                         | Builds the API image, tagged `student-api:<VERSION>` (`VERSION` is set in the Makefile).           |
+| `make docker-run`   | `docker-build`, `db-migrate` | Runs both of those, then starts the API container in the background.                              |
+| `make down`         | none                         | Stops and removes the containers. The `pgdata` database volume is **kept**.                        |
+
+**Dependency chain:**
+
+```
+make docker-run
+├── docker-build          build the API image
+└── db-migrate            apply migrations
+    └── db-up             start PostgreSQL and wait until healthy
+then: start the API container
+```
+
+### Local development (SQLite)
+
+| Target         | What it does                                                    |
+|----------------|-----------------------------------------------------------------|
+| `make install` | Create `.venv` with Python 3.12 and install `requirements.txt`  |
+| `make migrate` | Apply database migrations (`flask db upgrade`) to the local database |
+| `make run`     | Start the Flask dev server on port 5001 with debug mode on      |
+| `make test`    | Run the pytest suite with verbose output                        |
+
+The local targets call `.venv/bin/python` directly, so you don't need to activate the virtual environment first.
 
 ---
 
 ## Configuration
 
-Settings are read from environment variables. `python-dotenv` loads them from `.env` when the app starts.
+Settings come from environment variables. Copy [`.env.example`](.env.example) to `.env`, which already lists every variable with a working placeholder value:
 
-| Variable       | Required | Default | Description                                                         |
-|----------------|----------|---------|---------------------------------------------------------------------|
-| `DATABASE_URL` | **Yes**  | none    | SQLAlchemy database URL, for example `sqlite:///app.db`             |
-| `LOG_LEVEL`    | No       | `INFO`  | Lowest log level to print: `DEBUG`, `INFO`, `WARNING`, `ERROR`       |
+```bash
+cp .env.example .env
+```
 
-`.env` is listed in `.gitignore`, so your real settings never get committed. [`.env.example`](.env.example) is committed and lists every setting. When you add a new setting, add it there too.
+| Variable            | Used by                         | Default (if unset)  | Description                                                     |
+|---------------------|---------------------------------|---------------------|-----------------------------------------------------------------|
+| `POSTGRES_USER`     | Docker: `db` service + API      | `student`           | PostgreSQL username                                             |
+| `POSTGRES_PASSWORD` | Docker: `db` service + API      | `student_pass`      | PostgreSQL password                                             |
+| `POSTGRES_DB`       | Docker: `db` service + API      | `studentdb`         | PostgreSQL database name                                        |
+| `LOG_LEVEL`         | Docker and local                | `INFO`              | Lowest log level to print: `DEBUG`, `INFO`, `WARNING`, `ERROR`   |
+| `DATABASE_URL`      | Local development only          | none (**required** locally) | SQLAlchemy database URL, for example `sqlite:///app.db`  |
+
+**How the Docker settings are used:**
+- `docker-compose.yml` passes the three `POSTGRES_*` values to the **`db`** service, which creates the user and database on first start.
+- It also uses them to **build the API's `DATABASE_URL`**:
+  ```
+  postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+  ```
+- So inside Docker, the `DATABASE_URL` line in `.env` is ignored. Compose sets it for the container.
+
+`.env` is listed in `.gitignore`, so your real settings never get committed. `.env.example` is committed. When you add a new setting, add it there too.
+
+> **Changing the Postgres credentials later:** PostgreSQL only reads `POSTGRES_*` when the `pgdata` volume is first created. To change them after that, run `docker compose down -v` to remove the volume, which deletes the data, and then `make docker-run` again.
 
 ---
 
@@ -168,7 +275,7 @@ Settings are read from environment variables. `python-dotenv` loads them from `.
 
 | Method   | Path                        | Description            | Success | Possible errors    |
 |----------|-----------------------------|------------------------|---------|--------------------|
-| `GET`    | `/healthcheck`              | Is the service up?     | 200     | none               |
+| `GET`    | `/healthcheck`              | Is the service up and the database reachable? | 200 | 503 |
 | `GET`    | `/api/v1/students`          | List all students      | 200     | none               |
 | `POST`   | `/api/v1/students`          | Create a student       | 201     | 400, 409, 415      |
 | `GET`    | `/api/v1/students/<id>`     | Get one student        | 200     | 404                |
@@ -247,6 +354,21 @@ Status: `204 No Content`. The response has no body.
 
 ---
 
+## Healthcheck
+
+`GET /healthcheck` doesn't just report that the web server is up. It runs **`SELECT 1`** against the database, so it also proves the API can reach the database.
+
+| Database        | Status                    | Body                                              |
+|-----------------|---------------------------|---------------------------------------------------|
+| Reachable       | `200 OK`                  | `{"status": "ok"}`                                |
+| Not reachable   | `503 Service Unavailable` | `{"status": "error", "database": "unreachable"}`  |
+
+When the check fails, the reason is logged at `ERROR` level (`Healthcheck failed: ...`). The error details are never sent to the client.
+
+This makes it a good target for a load balancer or orchestrator. A `503` means "don't send traffic to this instance right now".
+
+---
+
 ## Validation rules
 
 | Field        | Type     | Required on create | Rule                                         |
@@ -267,7 +389,7 @@ The reasons behind each rule are written up in [docs/03-student-schema.md](docs/
 
 ## Error responses
 
-Every error is returned as JSON with an `error` message.
+Every error is returned as JSON.
 
 | Status | When                                            | Example body                                                                 |
 |--------|-------------------------------------------------|------------------------------------------------------------------------------|
@@ -279,6 +401,7 @@ Every error is returned as JSON with an `error` message.
 | 409    | The email is already used by another student    | `{"error": "A student with this email already exists"}`                      |
 | 415    | The request isn't sent as `application/json`    | `{"error": "Did not attempt to load JSON data because the request Content-Type was not 'application/json'."}` |
 | 500    | Anything unexpected                             | `{"error": "Internal server error"}`. The full traceback goes to the logs.    |
+| 503    | `/healthcheck` can't reach the database         | `{"status": "error", "database": "unreachable"}`                             |
 
 **How it works:** `errors.py` registers two handlers in `create_app()`:
 - `handle_http_error` turns any `HTTPException` (404, 415 and so on) into `{"error": <description>}` with the matching status code.
@@ -300,22 +423,28 @@ Logs are written to **stdout** in this format:
 | Student created / updated / deleted | `INFO`    |
 | Duplicate email on create           | `WARNING` |
 | Lookup of a student that's missing  | `WARNING` |
+| Healthcheck can't reach the database| `ERROR`   |
 | Unhandled exception (with traceback)| `ERROR`   |
 
-Set `LOG_LEVEL` in `.env` to control how much is printed. Logging to stdout is the standard for apps that may later run in Docker or Kubernetes, which collect a container's stdout automatically.
+Set `LOG_LEVEL` in `.env` to control how much is printed. Inside Docker, Gunicorn also writes one access-log line per request. To follow the API's logs, run:
+
+```bash
+docker compose logs -f api
+```
 
 ---
 
 ## Database migrations
 
-The database schema is managed with **Flask-Migrate**, which runs Alembic underneath. Each change to the schema is a versioned script in `migrations/versions/`, so every copy of the database can be brought to the same state.
+The database schema is managed with **Flask-Migrate**, which runs Alembic underneath. Each change to the schema is a versioned script in `migrations/versions/`, so every copy of the database, whether it's SQLite locally or PostgreSQL in Docker, can be brought to the same state.
 
-| Task                                    | Command                                                 |
-|-----------------------------------------|---------------------------------------------------------|
-| Apply all migrations                    | `make migrate`                                          |
-| Create a migration after editing a model| `.venv/bin/python -m flask --app app db migrate -m "describe the change"` |
-| Undo the last migration                 | `.venv/bin/python -m flask --app app db downgrade`      |
-| Show the current version                | `.venv/bin/python -m flask --app app db current`        |
+| Task                                     | Command                                                 |
+|------------------------------------------|---------------------------------------------------------|
+| Apply all migrations (Docker/PostgreSQL) | `make db-migrate`                                       |
+| Apply all migrations (local/SQLite)      | `make migrate`                                          |
+| Create a migration after editing a model | `.venv/bin/python -m flask --app app db migrate -m "describe the change"` |
+| Undo the last migration (local)          | `.venv/bin/python -m flask --app app db downgrade`      |
+| Show the current version (local)         | `.venv/bin/python -m flask --app app db current`        |
 
 Always read a generated migration before applying it. Alembic's autogenerate is good but not perfect.
 
@@ -333,7 +462,7 @@ Always read a generated migration before applying it. Alembic's autogenerate is 
 make test
 ```
 
-The tests use an **in-memory SQLite database**, so they never touch your real data. Each test gets a fresh, empty database.
+The tests run locally and use an **in-memory SQLite database**, so they never touch your real data and don't need Docker. Each test gets a fresh, empty database.
 
 | File                  | What it covers                                                                           |
 |-----------------------|------------------------------------------------------------------------------------------|
@@ -343,64 +472,6 @@ The tests use an **in-memory SQLite database**, so they never touch your real da
 | `test_validation.py`  | `validate_student_fields()` on its own, including the age boundaries 4, 5, 100 and 101 and text instead of a number |
 
 Current result: **17 passed**.
-
-## Running with Docker
-
-The image uses a **multi-stage build**: dependencies are installed in a full `python:3.12` builder stage, and only the installed packages and the code are copied into a slim runtime image. The API is served by **Gunicorn** and runs as a **non-root user**. Image size: about 290 MB, down from 1.7 GB with a single-stage build.
-
-### 1. Build the image
-
-```bash
-make docker-build
-```
-
-Images are tagged with semantic versions (`MAJOR.MINOR.PATCH`), never `latest`. The version is set by `VERSION` in the Makefile.
-
-### 2. Create the database tables
-
-```bash
-make docker-migrate
-```
-
-### 3. Run the container
-
-```bash
-make docker-run
-```
-
-The API is now available at http://localhost:5001.
-
-### Configuration
-
-Settings are passed in when the container starts and are never baked into the image (`.env` is excluded by `.dockerignore`). The make targets read them from `.env`. You can also pass them directly:
-
-```bash
-docker run --rm -p 5001:5000 \
-  -e DATABASE_URL=sqlite:///app.db \
-  -e LOG_LEVEL=INFO \
-  -v student-data:/app/instance \
-  student-api:1.0.1
-```
-
-### Data
-
-The SQLite database lives in a Docker volume named `student-data`, mounted at `/app/instance`, so data survives container restarts. To start over with an empty database, run `docker volume rm student-data`.
-
----
-
-## Makefile commands
-
-| Command        | What it does                                                    |
-|----------------|-----------------------------------------------------------------|
-| `make install` | Create `.venv` with Python 3.12 and install `requirements.txt`  |
-| `make migrate` | Apply database migrations (`flask db upgrade`)                  |
-| `make run`     | Start the dev server on port 5001 with debug mode on            |
-| `make test`    | Run the pytest suite with verbose output                        |
-| `make docker-build`   | Build the Docker image `student-api:<VERSION>`           |
-| `make docker-migrate` | Apply migrations inside a container, on the `student-data` volume |
-| `make docker-run`     | Run the container on port 5001, with settings from `.env`  |
-
-The Makefile calls `.venv/bin/python` directly, so you don't need to activate the virtual environment first.
 
 ---
 
@@ -425,5 +496,9 @@ This project was built one concept at a time, in roughly this order. `git log --
 | 13 | Tests                    | pytest fixtures, an in-memory test database, unit and endpoint tests     |
 | 14 | Makefile                 | One command each for install, migrate, run and test                      |
 | 15 | OpenAPI spec             | Documenting every endpoint, request and response in `openapi.yml`        |
+| 16 | Docker image             | Gunicorn, `.dockerignore`, a multi-stage build, a non-root user, semver image tags |
+| 17 | PostgreSQL               | The psycopg driver, and a healthcheck that tests the database (`503` when it's down) |
+| 18 | Docker Compose           | Two services, a private network, a named volume, `depends_on` with a healthcheck |
+| 19 | One-command setup        | `scripts/setup.sh` and Make targets that chain together (`docker-run` → `db-migrate` → `db-up`) |
 
 > **Note:** the notes in `docs/` were written during the early setup stage, when the virtual environment and `requirements.txt` lived inside `app/`. They have since moved back to the project root, where they are now.
