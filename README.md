@@ -20,8 +20,9 @@ This was built step by step as a learning project. The [Learning journey](#learn
 8. [Logging](#logging)
 9. [Database migrations](#database-migrations)
 10. [Testing](#testing)
-11. [Makefile commands](#makefile-commands)
-12. [Learning journey](#learning-journey)
+11. [Running with Docker](#running-with-docker)
+12. [Makefile commands](#makefile-commands)
+13. [Learning journey](#learning-journey)
 
 ---
 
@@ -36,6 +37,8 @@ This was built step by step as a learning project. The [Learning journey](#learn
 | SQLite               | The database: one file, no server needed                   |
 | python-dotenv        | Loads settings from a `.env` file                          |
 | pytest               | Automated tests                                            |
+| Gunicorn             | Production WSGI server (runs the app inside the container) |
+| Docker               | Container image (multi-stage build)                        |
 | OpenAPI 3.0          | Machine-readable API documentation (`openapi.yml`)         |
 
 The exact pinned versions are in [`requirements.txt`](requirements.txt). The reason for each package is explained in [docs/02-dependencies.md](docs/02-dependencies.md).
@@ -62,7 +65,9 @@ student-api/
 │   └── test_validation.py        ← the validation helper on its own
 ├── docs/                         ← learning notes written during setup
 ├── openapi.yml                   ← OpenAPI 3.0 spec for every endpoint
-├── Makefile                      ← shortcuts: install, migrate, run, test
+├── Dockerfile                    ← multi-stage image build: builder → slim runtime
+├── .dockerignore                 ← files kept out of the image (.env, .venv, tests…)
+├── Makefile                      ← shortcuts: install, migrate, run, test, docker-*
 ├── requirements.txt              ← pinned dependencies
 ├── .env.example                  ← template for .env: every setting with a working default
 ├── .env                          ← your local settings (not committed)
@@ -339,6 +344,48 @@ The tests use an **in-memory SQLite database**, so they never touch your real da
 
 Current result: **17 passed**.
 
+## Running with Docker
+
+The image uses a **multi-stage build**: dependencies are installed in a full `python:3.12` builder stage, and only the installed packages and the code are copied into a slim runtime image. The API is served by **Gunicorn** and runs as a **non-root user**. Image size: about 290 MB, down from 1.7 GB with a single-stage build.
+
+### 1. Build the image
+
+```bash
+make docker-build
+```
+
+Images are tagged with semantic versions (`MAJOR.MINOR.PATCH`), never `latest`. The version is set by `VERSION` in the Makefile.
+
+### 2. Create the database tables
+
+```bash
+make docker-migrate
+```
+
+### 3. Run the container
+
+```bash
+make docker-run
+```
+
+The API is now available at http://localhost:5001.
+
+### Configuration
+
+Settings are passed in when the container starts and are never baked into the image (`.env` is excluded by `.dockerignore`). The make targets read them from `.env`. You can also pass them directly:
+
+```bash
+docker run --rm -p 5001:5000 \
+  -e DATABASE_URL=sqlite:///app.db \
+  -e LOG_LEVEL=INFO \
+  -v student-data:/app/instance \
+  student-api:1.0.1
+```
+
+### Data
+
+The SQLite database lives in a Docker volume named `student-data`, mounted at `/app/instance`, so data survives container restarts. To start over with an empty database, run `docker volume rm student-data`.
+
 ---
 
 ## Makefile commands
@@ -349,6 +396,9 @@ Current result: **17 passed**.
 | `make migrate` | Apply database migrations (`flask db upgrade`)                  |
 | `make run`     | Start the dev server on port 5001 with debug mode on            |
 | `make test`    | Run the pytest suite with verbose output                        |
+| `make docker-build`   | Build the Docker image `student-api:<VERSION>`           |
+| `make docker-migrate` | Apply migrations inside a container, on the `student-data` volume |
+| `make docker-run`     | Run the container on port 5001, with settings from `.env`  |
 
 The Makefile calls `.venv/bin/python` directly, so you don't need to activate the virtual environment first.
 
