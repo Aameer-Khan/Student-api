@@ -3,6 +3,7 @@ logger = logging.getLogger(__name__)
 from flask import Blueprint, jsonify, request
 from app.models import Student, db
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy import text
 
 health_bp = Blueprint("health", __name__)
 students_bp = Blueprint("students", __name__, url_prefix="/api/v1")
@@ -10,6 +11,11 @@ students_bp = Blueprint("students", __name__, url_prefix="/api/v1")
 
 @health_bp.route("/healthcheck", methods=["GET"])
 def health_check():
+    try:
+        db.session.execute(text("SELECT 1"))
+    except Exception as exc:
+        logger.error("Healthcheck failed: %s", exc)
+        return jsonify({"status": "error", "database": "unreachable"}), 503
     return jsonify({"status": "ok"}), 200
 
 
