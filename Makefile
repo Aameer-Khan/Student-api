@@ -1,9 +1,11 @@
-.PHONY: install migrate run test docker-build docker-migrate docker-run
+.PHONY: install migrate run test db-up db-migrate docker-build docker-run down
 
 VENV:= .venv
 PYTHON := $(VENV)/bin/python
 IMAGE := student-api
-VERSION := 1.0.1
+VERSION := 1.1.0
+export VERSION
+
 
 install:
 	python3.12 -m venv $(VENV)
@@ -19,11 +21,17 @@ run:
 test:
 	$(PYTHON) -m pytest tests -v
 
+db-up:
+	docker compose up -d --wait db
+
+db-migrate: db-up
+	docker compose run --rm api flask --app app db upgrade
+
 docker-build:
-	docker build -t $(IMAGE):$(VERSION) .
+	docker compose build api
 
-docker-migrate:
-	docker run --rm --env-file .env -v student-data:/app/instance $(IMAGE):$(VERSION) flask --app app db upgrade
+docker-run: docker-build db-migrate
+	docker compose up -d api
 
-docker-run:
-	docker run --rm -p 5001:5000 --env-file .env -v student-data:/app/instance $(IMAGE):$(VERSION)
+down:
+	docker compose down
