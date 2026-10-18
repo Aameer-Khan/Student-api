@@ -19,7 +19,10 @@ permissions:
 
 jobs:
   ci:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, ec2]
+    env:
+      AWS_REGION: us-east-1
+      ECR_REPOSITORY: student-api
     steps:
       - name: Check out the code
         uses: actions/checkout@v5
@@ -37,3 +40,17 @@ jobs:
 
       - name: Run tests
         run: make test
+
+      - name: Docker login to ECR
+        run: |
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text --region "$AWS_REGION")
+          REGISTRY="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+          echo "REGISTRY=${REGISTRY}" >> "$GITHUB_ENV"
+          aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$REGISTRY"
+
+      - name: Docker build and push
+        run: |
+          TAG="$(make -s version)-${GITHUB_SHA::7}"
+          docker build -t "$REGISTRY/$ECR_REPOSITORY:$TAG" .
+          docker push "$REGISTRY/$ECR_REPOSITORY:$TAG"
+          echo "Pushed $REGISTRY/$ECR_REPOSITORY:$TAG"
