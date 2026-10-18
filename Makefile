@@ -1,11 +1,10 @@
-.PHONY: install migrate run test db-up db-migrate docker-build docker-run down
+.PHONY: install migrate run test db-up db-migrate docker-build docker-run down version
 
 VENV:= .venv
 PYTHON := $(VENV)/bin/python
 IMAGE := student-api
 VERSION := 1.1.0
 export VERSION
-
 
 install:
 	python3.12 -m venv $(VENV)
@@ -41,3 +40,6 @@ docker-run: docker-build db-migrate
 
 down:
 	docker compose down
+
+version:
+	@echo $(VERSION)
