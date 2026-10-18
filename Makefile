@@ -10,7 +10,7 @@ export VERSION
 install:
 	python3.12 -m venv $(VENV)
 	$(PYTHON) -m pip install --upgrade pip
-	$(PYTHON) -m pip install -r requirements.txt
+	$(PYTHON) -m pip install -r requirements-dev.txt
 
 build: install
 	$(PYTHON) -m compileall -q app
