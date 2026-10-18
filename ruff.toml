@@ -1,0 +1,8 @@
+[lint]
+select = ["E4", "E7", "E9", "F", "I", "BLE"]
+
+[lint.per-file-ignores]
+# These files must set up the environment before importing the app,
+# so imports after code are intentional there.
+"app/__init__.py" = ["E402"]
+"tests/conftest.py" = ["E402"]

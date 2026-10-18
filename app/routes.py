@@ -1,9 +1,12 @@
 import logging
-logger = logging.getLogger(__name__)
+
 from flask import Blueprint, jsonify, request
-from app.models import Student, db
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
+
+from app.models import Student, db
+
+logger = logging.getLogger(__name__)
 
 health_bp = Blueprint("health", __name__)
 students_bp = Blueprint("students", __name__, url_prefix="/api/v1")
@@ -13,7 +16,7 @@ students_bp = Blueprint("students", __name__, url_prefix="/api/v1")
 def health_check():
     try:
         db.session.execute(text("SELECT 1"))
-    except Exception as exc:
+    except SQLAlchemyError as exc:
         logger.error("Healthcheck failed: %s", exc)
         return jsonify({"status": "error", "database": "unreachable"}), 503
     return jsonify({"status": "ok"}), 200

@@ -12,6 +12,12 @@ install:
 	$(PYTHON) -m pip install --upgrade pip
 	$(PYTHON) -m pip install -r requirements.txt
 
+build: install
+	$(PYTHON) -m compileall -q app
+
+lint:
+	$(PYTHON) -m ruff check app tests
+
 migrate:
 	$(PYTHON) -m flask --app app db upgrade
 

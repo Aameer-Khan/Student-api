@@ -1,5 +1,6 @@
 from app.routes import validate_student_fields
 
+
 def test_valid_data_has_no_errors():
     errors = validate_student_fields({"name": "Aameer", "email": "a@example.com", "age": 25})
     assert errors == []

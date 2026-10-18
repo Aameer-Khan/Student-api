@@ -7,6 +7,7 @@ import pytest
 from app import create_app
 from app.models import db
 
+
 @pytest.fixture
 def app():
     app = create_app({"SQLALCHEMY_DATABASE_URI": "sqlite:///:memory:", "TESTING": True})

@@ -1,8 +1,8 @@
 import logging
-logger = logging.getLogger(__name__)
-from flask import jsonify
-from werkzeug.exceptions import HTTPException
 
+from flask import jsonify
+
+logger = logging.getLogger(__name__)
 
 def handle_http_error(error):
     return jsonify({"error": error.description}), error.code
