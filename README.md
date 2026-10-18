@@ -23,7 +23,8 @@ This was built step by step as a learning project. The [Learning journey](#learn
 11. [Logging](#logging)
 12. [Database migrations](#database-migrations)
 13. [Testing](#testing)
-14. [Learning journey](#learning-journey)
+14. [CI pipeline](#ci-pipeline)
+15. [Learning journey](#learning-journey)
 
 ---
 
@@ -40,12 +41,15 @@ This was built step by step as a learning project. The [Learning journey](#learn
 | SQLite               | Database for local development and tests: one file, no server     |
 | python-dotenv        | Loads settings from a `.env` file                                 |
 | pytest               | Automated tests                                                   |
+| Ruff                 | Linting (rules in `ruff.toml`)                                    |
 | Gunicorn             | Production WSGI server (runs the app inside the container)        |
 | Docker               | Container image (multi-stage build, non-root user)                |
 | Docker Compose       | Runs the API and the database together                            |
 | OpenAPI 3.0          | Machine-readable API documentation (`openapi.yml`)                |
+| GitHub Actions       | CI pipeline, on a self-hosted runner on AWS EC2                   |
+| Amazon ECR           | Container registry for the images CI builds                       |
 
-The exact pinned versions are in [`requirements.txt`](requirements.txt). The reason for each of the original packages is explained in [docs/02-dependencies.md](docs/02-dependencies.md).
+The exact pinned versions are in [`requirements.txt`](requirements.txt). The development tools (pytest, Ruff) are in [`requirements-dev.txt`](requirements-dev.txt), which also includes `requirements.txt`. The reason for each of the original packages is explained in [docs/02-dependencies.md](docs/02-dependencies.md).
 
 ---
 
@@ -67,6 +71,11 @@ student-api/
 │   ├── test_health.py            ← healthcheck endpoint
 │   ├── test_students.py          ← the student endpoints, end to end
 │   └── test_validation.py        ← the validation helper on its own
+├── .github/workflows/
+│   └── ci.yml                    ← CI pipeline: build, lint, test, push to ECR
+├── infra/                        ← CI runner setup
+│   ├── runner-bootstrap.sh       ← EC2 user data: turns a fresh instance into a runner host
+│   └── ecr-push-policy.json      ← IAM policy for the runner's instance role
 ├── scripts/
 │   └── setup.sh                  ← checks for (and installs) make and Docker
 ├── docs/                         ← learning notes written during setup
@@ -74,8 +83,10 @@ student-api/
 ├── Dockerfile                    ← multi-stage image build: builder → slim runtime
 ├── .dockerignore                 ← files kept out of the image (.env, .venv, tests…)
 ├── docker-compose.yml            ← two services: db (PostgreSQL) and api
-├── Makefile                      ← shortcuts for Docker and local development
-├── requirements.txt              ← pinned dependencies
+├── Makefile                      ← shortcuts for Docker, local development and CI
+├── requirements.txt              ← pinned runtime dependencies
+├── requirements-dev.txt          ← runtime + dev tools (pytest, ruff)
+├── ruff.toml                     ← lint rules
 ├── .env.example                  ← template for .env: every setting with a working default
 ├── .env                          ← your local settings (not committed)
 ├── instance/                     ← SQLite database file for local development (not committed)
@@ -154,7 +165,7 @@ To run the app directly on your machine against a SQLite file, you also need **P
 
 ```bash
 cp .env.example .env   # if you haven't already
-make install           # create .venv and install requirements.txt
+make install           # create .venv and install requirements-dev.txt
 make migrate           # create the tables in instance/app.db
 make run               # dev server on http://localhost:5001, with debug and auto-reload
 make test              # run the test suite
@@ -232,10 +243,13 @@ then: start the API container
 
 | Target         | What it does                                                    |
 |----------------|-----------------------------------------------------------------|
-| `make install` | Create `.venv` with Python 3.12 and install `requirements.txt`  |
+| `make install` | Create `.venv` with Python 3.12 and install `requirements-dev.txt` (runtime + pytest + ruff) |
 | `make migrate` | Apply database migrations (`flask db upgrade`) to the local database |
 | `make run`     | Start the Flask dev server on port 5001 with debug mode on      |
 | `make test`    | Run the pytest suite with verbose output                        |
+| `make build`   | Run `install`, then byte-compile `app/` to catch syntax errors (used by CI) |
+| `make lint`    | Run `ruff check app tests`                                      |
+| `make version` | Print `VERSION` (CI uses it for the image tag)                  |
 
 The local targets call `.venv/bin/python` directly, so you don't need to activate the virtual environment first.
 
@@ -475,6 +489,106 @@ Current result: **17 passed**.
 
 ---
 
+## CI pipeline
+
+The pipeline is defined in [`.github/workflows/ci.yml`](.github/workflows/ci.yml). It runs on GitHub Actions, on a **self-hosted runner on AWS EC2**. It builds, lints and tests the code, then pushes a Docker image to **Amazon ECR**.
+
+### Triggers
+
+| Trigger                 | When it runs                                                                    |
+|-------------------------|---------------------------------------------------------------------------------|
+| `push` to `main`        | Only when the push changes at least one of the paths below                      |
+| `workflow_dispatch`     | Manually, from **Actions → CI → Run workflow** on GitHub                        |
+
+**Paths that trigger a run:**
+
+| Path                          | Why it matters                                  |
+|-------------------------------|-------------------------------------------------|
+| `app/**`                      | Application code                                |
+| `tests/**`                    | Tests                                           |
+| `migrations/**`               | Database schema                                 |
+| `requirements*.txt`           | `requirements.txt` and `requirements-dev.txt`   |
+| `Dockerfile`                  | The image build                                 |
+| `Makefile`                    | The commands CI runs (and the image `VERSION`)  |
+| `ruff.toml`                   | Lint rules                                      |
+| `.github/workflows/ci.yml`    | The pipeline itself                             |
+
+Changes to documentation alone (`README.md`, `docs/`, `openapi.yml`) or to local-only files (`docker-compose.yml`, `scripts/`, `infra/`) **don't** start a run. To build after such a change, trigger it manually.
+
+The workflow has read-only access to the repository (`permissions: contents: read`).
+
+### Stages
+
+All stages run in order in one job (`ci`). If any stage fails, the job stops.
+
+| # | Stage                    | Command                         | What it does                                                                   |
+|---|--------------------------|---------------------------------|--------------------------------------------------------------------------------|
+| 1 | Check out the code       | `actions/checkout@v5`           | Fetches the commit being built                                                 |
+| 2 | Set up Python 3.12       | `actions/setup-python@v5`       | Makes Python 3.12 available on the runner                                      |
+| 3 | Build API                | `make build`                    | Creates `.venv`, installs `requirements-dev.txt`, byte-compiles `app/` to catch syntax errors |
+| 4 | Lint                     | `make lint`                     | Runs `ruff check app tests` with the rules in `ruff.toml`                      |
+| 5 | Run tests                | `make test`                     | Runs the pytest suite against in-memory SQLite                                 |
+| 6 | Docker login to ECR      | `aws ecr get-login-password`    | Looks up the AWS account ID, works out the registry URL and logs Docker in to ECR |
+| 7 | Docker build and push    | `docker build` / `docker push`  | Builds and pushes the image, unless that tag already exists (see below)        |
+
+The image is only pushed if the build, lint and tests all pass.
+
+### Self-hosted runner on EC2
+
+The job runs on `runs-on: [self-hosted, ec2]`, which means a runner registered with the **`ec2`** label.
+
+- **The host:** an Ubuntu 24.04 EC2 instance (x86_64, since the bootstrap installs the x86_64 AWS CLI).
+- **What gets installed on first boot:** make, git, Python 3.12 venv support, Docker and AWS CLI v2. This is done by [`infra/runner-bootstrap.sh`](infra/runner-bootstrap.sh), which runs as EC2 user data.
+- **AWS access comes from an IAM instance role, not stored keys.** The instance has an IAM role attached through its instance profile. The AWS CLI picks up short-lived credentials from it automatically. There are **no AWS access keys** stored in GitHub secrets or on the runner.
+- **What the role allows:** it has [`infra/ecr-push-policy.json`](infra/ecr-push-policy.json) attached. It allows `ecr:GetAuthorizationToken` (for `docker login`), plus checking for, pushing and reading images in the `student-api` repository only. It has no other AWS permissions.
+- **Region:** `us-east-1`, set as `AWS_REGION` in the workflow.
+
+### ECR image tags
+
+Images are pushed to:
+
+```
+<account-id>.dkr.ecr.us-east-1.amazonaws.com/student-api:<version>-<commit>
+```
+
+| Part        | Comes from                                         | Example   |
+|-------------|----------------------------------------------------|-----------|
+| `<version>` | `VERSION` in the Makefile (read with `make -s version`) | `1.1.0` |
+| `<commit>`  | The first 7 characters of the commit SHA (`GITHUB_SHA`) | `78d5261` |
+
+So an image looks like `student-api:1.1.0-78d5261`. **There is never a `latest` tag.**
+
+- **Immutable tags.** The ECR repository has tag immutability turned on, so once a tag has been pushed, it can never be overwritten. Each tag always points at exactly one image, built from exactly one commit.
+- **Skipped if it already exists.** Before building, the pipeline checks ECR with `aws ecr describe-images`:
+  - **The tag exists:** it logs `Image <tag> already exists in ECR, nothing to push` and ends successfully. This happens when you re-run the workflow on the same commit. Without the check, the push would fail because the tag is immutable.
+  - **`ImageNotFoundException`:** the tag is new, so it builds and pushes.
+  - **Any other error,** such as missing permissions or a wrong region: it prints the error and **fails the job**, so a real problem is never mistaken for "not found".
+- **Releasing a new version:** bump `VERSION` in the Makefile. Every commit after that gets tags starting with the new version.
+
+### Setup files in `infra/`
+
+| File                                                       | What it is                                                                 |
+|------------------------------------------------------------|----------------------------------------------------------------------------|
+| [`infra/runner-bootstrap.sh`](infra/runner-bootstrap.sh)   | EC2 **user data** script. It runs once as root on first boot and installs make, git, Python 3.12 venv, Docker and AWS CLI v2. It adds `ubuntu` to the `docker` group, creates `/home/ubuntu/actions-runner`, and writes `/home/ubuntu/BOOTSTRAP_DONE` when finished. Its output goes to `/var/log/cloud-init-output.log`. |
+| [`infra/ecr-push-policy.json`](infra/ecr-push-policy.json) | The **IAM policy** for the runner's instance role. It covers logging in to ECR and checking for, pushing and pulling images, limited to the `student-api` repository in `us-east-1`. |
+
+### Setting up the pipeline from scratch
+
+1. **Create the ECR repository** with immutable tags:
+   ```bash
+   aws ecr create-repository --repository-name student-api \
+     --image-tag-mutability IMMUTABLE --region us-east-1
+   ```
+2. **Create an IAM role** for EC2, attach `infra/ecr-push-policy.json` to it as a policy, and wrap it in an instance profile.
+3. **Launch an EC2 instance:** Ubuntu 24.04 on x86_64, with that instance profile attached and `infra/runner-bootstrap.sh` pasted in as **user data**. Wait until `/home/ubuntu/BOOTSTRAP_DONE` exists.
+4. **Register the runner by hand.** This step can't be automated, because it needs a short-lived token from GitHub.
+   1. On GitHub, go to **Settings → Actions → Runners → New self-hosted runner** and choose Linux / x64.
+   2. On the instance, as `ubuntu`, run the download and `./config.sh` commands GitHub shows, inside `/home/ubuntu/actions-runner`. Add `--labels ec2` to `./config.sh`.
+   3. Install it as a service so it survives reboots: `sudo ./svc.sh install ubuntu && sudo ./svc.sh start`.
+5. **Run the workflow** from **Actions → CI → Run workflow**, and check that the image shows up in ECR.
+
+---
+
 ## Learning journey
 
 This project was built one concept at a time, in roughly this order. `git log --oneline` shows the commit for each step.
@@ -500,5 +614,7 @@ This project was built one concept at a time, in roughly this order. `git log --
 | 17 | PostgreSQL               | The psycopg driver, and a healthcheck that tests the database (`503` when it's down) |
 | 18 | Docker Compose           | Two services, a private network, a named volume, `depends_on` with a healthcheck |
 | 19 | One-command setup        | `scripts/setup.sh` and Make targets that chain together (`docker-run` → `db-migrate` → `db-up`) |
+| 20 | Linting                  | Ruff, and separating runtime from dev dependencies (`requirements-dev.txt`) |
+| 21 | CI pipeline              | GitHub Actions on a self-hosted EC2 runner, an IAM instance role, immutable `<version>-<commit>` tags in ECR |
 
 > **Note:** the notes in `docs/` were written during the early setup stage, when the virtual environment and `requirements.txt` lived inside `app/`. They have since moved back to the project root, where they are now.
