@@ -51,6 +51,15 @@ jobs:
       - name: Docker build and push
         run: |
           TAG="$(make -s version)-${GITHUB_SHA::7}"
+          if OUTPUT=$(aws ecr describe-images --repository-name "$ECR_REPOSITORY" --image-ids imageTag="$TAG" --region "$AWS_REGION" 2>&1); then
+            echo "Image $TAG already exists in ECR, nothing to push"
+            exit 0
+          elif echo "$OUTPUT" | grep -q ImageNotFoundException; then
+            echo "Image $TAG is not in ECR yet, building it"
+          else
+            echo "$OUTPUT"
+            exit 1
+          fi
           docker build -t "$REGISTRY/$ECR_REPOSITORY:$TAG" .
           docker push "$REGISTRY/$ECR_REPOSITORY:$TAG"
           echo "Pushed $REGISTRY/$ECR_REPOSITORY:$TAG"
