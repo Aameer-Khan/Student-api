@@ -1,4 +1,4 @@
-.PHONY: install migrate run test db-up db-migrate docker-build docker-run down version prod-build prod-db prod-migrate deploy prod-ps prod-down prod-stop prod-start prod-logs smoke
+.PHONY: install migrate run test db-up db-migrate docker-build docker-run down version prod-build prod-db prod-migrate deploy prod-ps prod-down prod-stop prod-start prod-logs smoke cluster-up cluster-down
 
 VENV:= .venv
 PYTHON := $(VENV)/bin/python
@@ -75,3 +75,13 @@ prod-logs:
 
 smoke:
 	npx --yes newman run deploy/postman/student-api.postman_collection.json -e deploy/postman/local.postman_environment.json
+
+CLUSTER := student-api
+KIND_CONFIG := infra/k8s/kind-config.yaml
+
+cluster-up:
+	@kind get clusters | grep -qx $(CLUSTER) || kind create cluster --config $(KIND_CONFIG)
+	kubectl get nodes -L type
+
+cluster-down:
+	kind delete cluster --name $(CLUSTER)
