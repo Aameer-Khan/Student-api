@@ -1,4 +1,4 @@
-.PHONY: install migrate run test db-up db-migrate docker-build docker-run down version
+.PHONY: install migrate run test db-up db-migrate docker-build docker-run down version prod-build prod-db prod-migrate deploy prod-ps prod-down prod-stop prod-start prod-logs smoke
 
 VENV:= .venv
 PYTHON := $(VENV)/bin/python
@@ -43,3 +43,35 @@ down:
 
 version:
 	@echo $(VERSION)
+
+PROD := docker compose -f deploy/docker-compose.yml --env-file deploy/.env
+
+prod-build:
+	$(PROD) build api1
+
+prod-db:
+	$(PROD) up -d --wait db
+
+prod-migrate: prod-db
+	$(PROD) run --rm api1 flask --app app db upgrade
+
+deploy: prod-build prod-migrate
+	$(PROD) up -d
+
+prod-ps:
+	$(PROD) ps
+
+prod-down:
+	$(PROD) down
+
+prod-stop:
+	$(PROD) stop $(SVC)
+
+prod-start:
+	$(PROD) start $(SVC)
+
+prod-logs:
+	$(PROD) logs -f $(SVC)
+
+smoke:
+	npx --yes newman run deploy/postman/student-api.postman_collection.json -e deploy/postman/local.postman_environment.json
