@@ -24,7 +24,8 @@ This was built step by step as a learning project. The [Learning journey](#learn
 12. [Database migrations](#database-migrations)
 13. [Testing](#testing)
 14. [CI pipeline](#ci-pipeline)
-15. [Learning journey](#learning-journey)
+15. [Production deploy](#production-deploy)
+16. [Learning journey](#learning-journey)
 
 ---
 
@@ -45,6 +46,8 @@ This was built step by step as a learning project. The [Learning journey](#learn
 | Gunicorn             | Production WSGI server (runs the app inside the container)        |
 | Docker               | Container image (multi-stage build, non-root user)                |
 | Docker Compose       | Runs the API and the database together                            |
+| nginx 1.28           | Load balancer in front of two API replicas (production deploy)    |
+| Postman / newman     | API smoke tests (`make smoke`)                                    |
 | OpenAPI 3.0          | Machine-readable API documentation (`openapi.yml`)                |
 | GitHub Actions       | CI pipeline, on a self-hosted runner on AWS EC2                   |
 | Amazon ECR           | Container registry for the images CI builds                       |
@@ -73,16 +76,22 @@ student-api/
 │   └── test_validation.py        ← the validation helper on its own
 ├── .github/workflows/
 │   └── ci.yml                    ← CI pipeline: build, lint, test, push to ECR
-├── infra/                        ← CI runner setup
-│   ├── runner-bootstrap.sh       ← EC2 user data: turns a fresh instance into a runner host
-│   └── ecr-push-policy.json      ← IAM policy for the runner's instance role
+├── deploy/                       ← production setup: nginx + 2 API replicas + PostgreSQL
+│   ├── docker-compose.yml        ← db, api1, api2 and nginx
+│   ├── .env.example              ← template for deploy/.env
+│   ├── nginx/nginx.conf          ← load balancer config
+│   └── postman/                  ← smoke-test collection + environment
+├── infra/                        ← EC2 setup
+│   ├── runner-bootstrap.sh       ← user data: turns a fresh instance into a CI runner host
+│   ├── ecr-push-policy.json      ← IAM policy for the runner's instance role
+│   └── server-bootstrap.sh       ← user data: prepares the server that runs the production stack
 ├── scripts/
 │   └── setup.sh                  ← checks for (and installs) make and Docker
 ├── docs/                         ← learning notes written during setup
 ├── openapi.yml                   ← OpenAPI 3.0 spec for every endpoint
 ├── Dockerfile                    ← multi-stage image build: builder → slim runtime
 ├── .dockerignore                 ← files kept out of the image (.env, .venv, tests…)
-├── docker-compose.yml            ← two services: db (PostgreSQL) and api
+├── docker-compose.yml            ← development: two services, db (PostgreSQL) and api
 ├── Makefile                      ← shortcuts for Docker, local development and CI
 ├── requirements.txt              ← pinned runtime dependencies
 ├── requirements-dev.txt          ← runtime + dev tools (pytest, ruff)
@@ -177,7 +186,9 @@ The local targets use `DATABASE_URL` from `.env`, which is `sqlite:///app.db` by
 
 ## Architecture
 
-`docker compose` runs two services, defined in [`docker-compose.yml`](docker-compose.yml):
+This section describes the **development** setup. `docker compose` runs two services, defined in [`docker-compose.yml`](docker-compose.yml). The production setup, with a load balancer and two API replicas, is described in [Production deploy](#production-deploy).
+
+The two development services:
 
 ```
               your machine
@@ -513,7 +524,7 @@ The pipeline is defined in [`.github/workflows/ci.yml`](.github/workflows/ci.yml
 | `ruff.toml`                   | Lint rules                                      |
 | `.github/workflows/ci.yml`    | The pipeline itself                             |
 
-Changes to documentation alone (`README.md`, `docs/`, `openapi.yml`) or to local-only files (`docker-compose.yml`, `scripts/`, `infra/`) **don't** start a run. To build after such a change, trigger it manually.
+Changes to documentation alone (`README.md`, `docs/`, `openapi.yml`) or to files outside the list (`docker-compose.yml`, `deploy/`, `scripts/`, `infra/`) **don't** start a run. To build after such a change, trigger it manually.
 
 The workflow has read-only access to the repository (`permissions: contents: read`).
 
@@ -572,6 +583,8 @@ So an image looks like `student-api:1.1.0-78d5261`. **There is never a `latest` 
 | [`infra/runner-bootstrap.sh`](infra/runner-bootstrap.sh)   | EC2 **user data** script. It runs once as root on first boot and installs make, git, Python 3.12 venv, Docker and AWS CLI v2. It adds `ubuntu` to the `docker` group, creates `/home/ubuntu/actions-runner`, and writes `/home/ubuntu/BOOTSTRAP_DONE` when finished. Its output goes to `/var/log/cloud-init-output.log`. |
 | [`infra/ecr-push-policy.json`](infra/ecr-push-policy.json) | The **IAM policy** for the runner's instance role. It covers logging in to ECR and checking for, pushing and pulling images, limited to the `student-api` repository in `us-east-1`. |
 
+`infra/` also holds [`server-bootstrap.sh`](infra/server-bootstrap.sh), which sets up the server that *runs* the app. It isn't part of the pipeline. See [Production deploy](#production-deploy).
+
 ### Setting up the pipeline from scratch
 
 1. **Create the ECR repository** with immutable tags:
@@ -586,6 +599,140 @@ So an image looks like `student-api:1.1.0-78d5261`. **There is never a `latest` 
    2. On the instance, as `ubuntu`, run the download and `./config.sh` commands GitHub shows, inside `/home/ubuntu/actions-runner`. Add `--labels ec2` to `./config.sh`.
    3. Install it as a service so it survives reboots: `sudo ./svc.sh install ubuntu && sudo ./svc.sh start`.
 5. **Run the workflow** from **Actions → CI → Run workflow**, and check that the image shows up in ECR.
+
+---
+
+## Production deploy
+
+[`deploy/`](deploy/) holds a production-style setup: **two API replicas behind an nginx load balancer**, with PostgreSQL behind them. It is separate from the development `docker-compose.yml` in the project root and has its own Compose project, `student-api-prod`.
+
+```
+deploy/
+├── docker-compose.yml                       ← db, api1, api2 and nginx
+├── .env.example                             ← template for deploy/.env
+├── nginx/
+│   └── nginx.conf                           ← load balancer config
+└── postman/
+    ├── student-api.postman_collection.json  ← 6 requests with tests
+    └── local.postman_environment.json       ← base_url = http://localhost:8080
+```
+
+### Architecture
+
+```
+   you ──▶ localhost:8080 ──▶ ┌───────┐ ──▶ api1:5000 ──┐
+                              │ nginx │                  ├──▶ db:5432 ──▶ volume: pgdata
+                              └───────┘ ──▶ api2:5000 ──┘
+                                 (the only published port)
+```
+
+| Service | Image                     | Role                                                                    |
+|---------|---------------------------|-------------------------------------------------------------------------|
+| `nginx` | `nginx:1.28-alpine`       | The only service exposed to the host: port **8080** → container port 80. Spreads requests across both replicas. |
+| `api1`  | `student-api:<VERSION>`   | API replica 1. This is the service that builds the image.               |
+| `api2`  | `student-api:<VERSION>`   | API replica 2. It reuses the image `api1` built, so nothing is built twice. |
+| `db`    | `postgres:17-alpine`      | PostgreSQL, with data in the named volume `pgdata`. The port is **not** published. |
+
+- **Round-robin balancing.** The `upstream student_api` block in `nginx.conf` lists `api1:5000` and `api2:5000`. nginx alternates between them by default.
+- **Failover.** `proxy_next_upstream error timeout http_502 http_503` retries a failed request on the other replica, and `proxy_connect_timeout 2s` makes a dead replica fail fast instead of hanging. A client doesn't see an error just because one replica is down.
+- **See which replica answered.** Every response has an `X-Upstream` header with the address of the replica that served it.
+- **Healthchecks.** Each API replica checks its own `/healthcheck` (which tests the database) every 10 seconds, and is marked unhealthy after 3 failures. nginx only starts once **both** replicas are healthy, and the replicas only start once the database is healthy.
+- **Self-healing.** All services use `restart: unless-stopped`, so they come back after a crash or a server reboot, unless you stopped them yourself.
+- **Image version.** Like the development setup, the image tag comes from `VERSION` in the Makefile, so use the `make` targets below rather than plain `docker compose`.
+
+### Configuration
+
+```bash
+cp deploy/.env.example deploy/.env
+```
+
+| Variable            | Description                                                     |
+|---------------------|-----------------------------------------------------------------|
+| `POSTGRES_USER`     | PostgreSQL username                                             |
+| `POSTGRES_PASSWORD` | PostgreSQL password. **Replace the placeholder with a strong password.** |
+| `POSTGRES_DB`       | PostgreSQL database name                                        |
+| `LOG_LEVEL`         | `DEBUG`, `INFO`, `WARNING` or `ERROR`                           |
+
+Unlike the development setup, the production compose file has **no default values**, so every variable must be set in `deploy/.env`. This file is ignored by git (the `.env` rule in `.gitignore` matches it), so your real password is never committed. The two API replicas share one `DATABASE_URL`, which is built from the `POSTGRES_*` values.
+
+### Make targets
+
+| Target              | Depends on                | What it does                                                                |
+|---------------------|---------------------------|-----------------------------------------------------------------------------|
+| `make prod-build`   | none                      | Builds the API image (`student-api:<VERSION>`) through `api1`.              |
+| `make prod-db`      | none                      | Starts PostgreSQL and waits until it is healthy.                            |
+| `make prod-migrate` | `prod-db`                 | Applies the database migrations in a one-off container.                     |
+| `make deploy`       | `prod-build`, `prod-migrate` | Runs both, then starts the whole stack in the background.               |
+| `make prod-ps`      | none                      | Shows each service and its health.                                          |
+| `make prod-logs`    | none                      | Follows the logs. Add `SVC=api1` for one service.                           |
+| `make prod-stop`    | none                      | Stops the given service: `make prod-stop SVC=api1`. Without `SVC`, it stops everything. |
+| `make prod-start`   | none                      | Starts it again: `make prod-start SVC=api1`.                                |
+| `make prod-down`    | none                      | Stops and removes the containers. The `pgdata` volume is **kept**.          |
+| `make smoke`        | none                      | Runs the Postman collection against `http://localhost:8080` with newman.    |
+
+**Dependency chain:**
+
+```
+make deploy
+├── prod-build            build the API image
+└── prod-migrate          apply migrations
+    └── prod-db           start PostgreSQL and wait until healthy
+then: start db, api1, api2 and nginx
+```
+
+### Deploying
+
+```bash
+cp deploy/.env.example deploy/.env    # then edit it and set a real password
+make deploy
+make prod-ps                          # wait until api1, api2 and db show "healthy"
+curl -i http://localhost:8080/healthcheck
+```
+
+The response should be `200` with `{"status": "ok"}` and an `X-Upstream` header.
+
+### Smoke tests (Postman / newman)
+
+```bash
+make smoke
+```
+
+This runs [`student-api.postman_collection.json`](deploy/postman/student-api.postman_collection.json) with **newman**. The environment file points it at `http://localhost:8080`, so every request goes through nginx.
+
+| # | Request          | Method and path                           |
+|---|------------------|-------------------------------------------|
+| 1 | Healthcheck      | `GET /healthcheck`                        |
+| 2 | Create Student   | `POST /api/v1/students`                   |
+| 3 | List Students    | `GET /api/v1/students`                    |
+| 4 | Get student      | `GET /api/v1/students/{{student_id}}`     |
+| 5 | Update student   | `PATCH /api/v1/students/{{student_id}}`   |
+| 6 | Delete student   | `DELETE /api/v1/students/{{student_id}}`  |
+
+Each request has tests that check the response. The student created in step 2 is stored in the `student_id` variable and used by steps 4–6, and step 6 deletes it again.
+
+`make smoke` needs **Node.js** because it runs newman through `npx`. To use the collection in the Postman app instead, import both files from `deploy/postman/`.
+
+### Trying out failover
+
+```bash
+make prod-stop SVC=api1               # take one replica down
+curl -si http://localhost:8080/healthcheck | grep -i x-upstream
+make prod-start SVC=api1              # bring it back
+```
+
+While `api1` is stopped, requests still succeed and every `X-Upstream` points at `api2`.
+
+### Preparing the server: `infra/server-bootstrap.sh`
+
+[`infra/server-bootstrap.sh`](infra/server-bootstrap.sh) is EC2 **user data** for the machine that runs the stack. On first boot it runs as root and:
+
+1. Installs `make`, `git` and `curl`.
+2. Installs Docker with the `get.docker.com` script (skipped if Docker is already there), and enables it at boot.
+3. Adds the `ubuntu` user to the `docker` group.
+4. Prints the Docker, Docker Compose and make versions, so you can see them in the boot log.
+5. Creates `/home/ubuntu/BOOTSTRAP_DONE` when it has finished.
+
+It doesn't fetch the code or start anything. After the file appears, log in and run [Deploying](#deploying): clone the repository, create `deploy/.env` and run `make deploy`. This is a different script from `infra/runner-bootstrap.sh`, which prepares the [CI runner](#self-hosted-runner-on-ec2).
 
 ---
 
@@ -616,5 +763,6 @@ This project was built one concept at a time, in roughly this order. `git log --
 | 19 | One-command setup        | `scripts/setup.sh` and Make targets that chain together (`docker-run` → `db-migrate` → `db-up`) |
 | 20 | Linting                  | Ruff, and separating runtime from dev dependencies (`requirements-dev.txt`) |
 | 21 | CI pipeline              | GitHub Actions on a self-hosted EC2 runner, an IAM instance role, immutable `<version>-<commit>` tags in ECR |
+| 22 | Production deploy        | An nginx load balancer, two API replicas, container healthchecks, failover, Postman/newman smoke tests and a server bootstrap script |
 
 > **Note:** the notes in `docs/` were written during the early setup stage, when the virtual environment and `requirements.txt` lived inside `app/`. They have since moved back to the project root, where they are now.
