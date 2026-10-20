@@ -1,4 +1,4 @@
-.PHONY: install migrate run test db-up db-migrate docker-build docker-run down version prod-build prod-db prod-migrate deploy prod-ps prod-down prod-stop prod-start prod-logs smoke cluster-up cluster-down
+.PHONY: install migrate run test db-up db-migrate docker-build docker-run down version prod-build prod-db prod-migrate deploy prod-ps prod-down prod-stop prod-start prod-logs smoke cluster-up cluster-down k8s-load k8s-deploy
 
 VENV:= .venv
 PYTHON := $(VENV)/bin/python
@@ -85,3 +85,10 @@ cluster-up:
 
 cluster-down:
 	kind delete cluster --name $(CLUSTER)
+
+k8s-load:
+	kind load docker-image student-api:$(VERSION) --name $(CLUSTER)
+
+k8s-deploy: k8s-load
+	kubectl apply -f k8s/student-api/database.yml
+	kubectl apply -f k8s/student-api/application.yml

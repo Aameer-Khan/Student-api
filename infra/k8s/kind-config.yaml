@@ -10,6 +10,9 @@ nodes:
   image: kindest/node:v1.37.0
   labels:
     type: application
+  extraPortMappings:
+  - containerPort: 30080
+    hostPort: 8080
 - role: worker
   image: kindest/node:v1.37.0
   labels:
