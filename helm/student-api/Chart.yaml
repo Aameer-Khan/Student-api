@@ -1,0 +1,6 @@
+apiVersion: v2
+name: student-api
+description: Student CRUD REST API (Flask) with init-container migrations
+type: application
+version: 0.1.0
+appVersion: "1.1.0"

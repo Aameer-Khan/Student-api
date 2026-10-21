@@ -1,0 +1,28 @@
+replicaCount: 2
+
+image:
+  repository: student-api
+  tag: "" # empty = use the chart's appVersion
+  pullPolicy: IfNotPresent
+
+nodeSelector:
+  type: application
+
+config:
+  LOG_LEVEL: INFO
+  DB_HOST: db
+  DB_PORT: "5432"
+
+dbSecretName: db-credentials
+
+service:
+  type: NodePort
+  port: 80
+  nodePort: 30080
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    memory: 256Mi
