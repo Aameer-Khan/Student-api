@@ -1,9 +1,11 @@
-.PHONY: install migrate run test db-up db-migrate docker-build docker-run down version prod-build prod-db prod-migrate deploy prod-ps prod-down prod-stop prod-start prod-logs smoke cluster-up cluster-down k8s-load k8s-deploy
+.PHONY: install migrate run test db-up db-migrate docker-build docker-run down version prod-build prod-db prod-migrate deploy prod-ps prod-down prod-stop prod-start prod-logs smoke cluster-up cluster-down k8s-load k8s-deploy vault-unseal k8s-platform
 
 VENV:= .venv
 PYTHON := $(VENV)/bin/python
 IMAGE := student-api
 VERSION := 1.1.0
+VAULT_CHART := 0.34.1
+ESO_CHART := 2.13.0
 export VERSION
 
 install:
@@ -92,3 +94,13 @@ k8s-load:
 k8s-deploy: k8s-load
 	kubectl apply -f k8s/student-api/database.yml
 	kubectl apply -f k8s/student-api/application.yml
+
+vault-unseal:
+	kubectl -n vault exec vault-0 -- vault operator unseal $$(jq -r '.unseal_keys_b64[0]' $(HOME)/.vault-lab/init.json)
+
+VAULT_CHART := 0.34.1
+ESO_CHART := 2.13.0
+
+k8s-platform:
+	helm upgrade --install vault hashicorp/vault -n vault --create-namespace --version $(VAULT_CHART) -f k8s/vault/values.yaml
+	helm upgrade --install external-secrets external-secrets/external-secrets -n external-secrets --create-namespace --version $(ESO_CHART) -f k8s/external-secrets/values.yaml --wait

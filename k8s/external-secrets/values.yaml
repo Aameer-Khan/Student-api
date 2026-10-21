@@ -1,0 +1,12 @@
+installCRDs: true
+
+nodeSelector:
+  type: dependent_services
+
+webhook:
+  nodeSelector:
+    type: dependent_services
+
+certController:
+  nodeSelector:
+    type: dependent_services

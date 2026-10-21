@@ -3,6 +3,48 @@ kind: Namespace
 metadata:
   name: student-api
 ---
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: eso-vault
+  namespace: student-api
+---
+apiVersion: external-secrets.io/v1
+kind: SecretStore
+metadata:
+  name: vault-backend
+  namespace: student-api
+spec:
+  provider:
+    vault:
+      server: "http://vault.vault.svc.cluster.local:8200"
+      path: "secret"
+      version: "v2"
+      auth:
+        kubernetes:
+          mountPath: "kubernetes"
+          role: "student-api"
+          serviceAccountRef:
+            name: eso-vault
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: db-credentials
+  namespace: student-api
+spec:
+  refreshInterval: 1h
+  secretStoreRef:
+    name: vault-backend
+    kind: SecretStore
+  target:
+    name: db-credentials
+    creationPolicy: Owner
+  dataFrom:
+  - extract:
+      key: student-api/db
+---
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
