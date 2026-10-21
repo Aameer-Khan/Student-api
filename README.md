@@ -804,11 +804,14 @@ helm repo update
 | Path | What it holds |
 |------|---------------|
 | [`infra/k8s/kind-config.yaml`](infra/k8s/kind-config.yaml) | kind cluster: 1 control plane + 3 labelled workers, pinned node image, port mapping host 8080 → node 30080 on the application worker. |
-| [`k8s/student-api/database.yml`](k8s/student-api/database.yml) | Namespace, ServiceAccount `eso-vault`, SecretStore `vault-backend`, ExternalSecret `db-credentials`, PVC `postgres-data`, Deployment `postgres` (Recreate strategy, nodeSelector `type=database`), Service `db` (ClusterIP). |
-| [`k8s/student-api/application.yml`](k8s/student-api/application.yml) | Namespace, ConfigMap `student-api-config` (`LOG_LEVEL`, `DB_HOST`, `DB_PORT`), Deployment `student-api` (2 replicas, nodeSelector `type=application`, init container `migrate` that runs `flask --app app db upgrade`, readiness probe HTTP `/healthcheck`, liveness probe TCP 5000, resource requests and limits), Service `student-api` (NodePort 30080). |
-| [`k8s/vault/values.yaml`](k8s/vault/values.yaml) | Helm values: standalone Vault, file storage on a 1Gi PVC, injector disabled, nodeSelector `type=dependent_services`. |
-| [`k8s/vault/student-api-policy.hcl`](k8s/vault/student-api-policy.hcl) | Vault policy: read-only on `secret/data/student-api/*`. |
-| [`k8s/external-secrets/values.yaml`](k8s/external-secrets/values.yaml) | Helm values: ESO controller, webhook and cert-controller on `type=dependent_services`. |
+| [`helm/student-api/`](helm/student-api/) | Own chart: ConfigMap, Deployment (init container `migrate`), Service (NodePort 30080). |
+| [`helm/postgres/`](helm/postgres/) | Own chart: ServiceAccount `eso-vault`, SecretStore `vault-backend`, ExternalSecret `db-credentials`, PVC `<release>-data` (kept on uninstall), Deployment, Service `db`. |
+| [`helm/vault/`](helm/vault/) | Official HashiCorp chart 0.34.1, vendored with `helm pull --untar`. |
+| [`helm/external-secrets/`](helm/external-secrets/) | Official ESO chart 2.13.0, vendored. |
+| [`helm/values/vault.yaml`](helm/values/vault.yaml), [`helm/values/external-secrets.yaml`](helm/values/external-secrets.yaml) | Our settings for the vendored charts. |
+| [`helm/values/vault-student-api-policy.hcl`](helm/values/vault-student-api-policy.hcl) | Vault read-only policy. |
+
+The `k8s/` manifests were removed. They remain in Git history.
 
 ---
 
@@ -819,10 +822,10 @@ helm repo update
 | `make cluster-up`   | Creates the kind cluster from `infra/k8s/kind-config.yaml`. Skips if it already exists.       |
 | `make cluster-down` | Deletes the kind cluster.                                                                     |
 | `make docker-build` | Builds the API image `student-api:1.1.0`.                                                     |
-| `make k8s-platform` | Installs or upgrades Vault (chart 0.34.1) and ESO (chart 2.13.0) with Helm. Idempotent.       |
+| `make helm-platform` | Installs or upgrades Vault and ESO from the vendored charts.                                |
 | `make vault-unseal` | Unseals Vault using the key saved in `~/.vault-lab/init.json`.                                |
-| `make k8s-load`     | Copies the local image `student-api:1.1.0` into the kind nodes.                               |
-| `make k8s-deploy`   | Runs `k8s-load`, then `kubectl apply` on `database.yml` and `application.yml`.                |
+| `make helm-lint`    | Lints the `postgres` and `student-api` charts.                                                |
+| `make helm-deploy`  | Runs `helm-lint`, loads the image into kind, then runs `helm upgrade --install postgres`, then `student-api` with `image.tag=$(VERSION)`. |
 | `make smoke`        | Runs the Postman collection with Newman against `http://localhost:8080`.                      |
 
 ---
@@ -841,7 +844,7 @@ make docker-build
 ### Step 2: Vault and ESO
 
 ```bash
-make k8s-platform
+make helm-platform
 kubectl -n vault get pods
 ```
 
@@ -876,7 +879,7 @@ vault_cmd kv put secret/student-api/db POSTGRES_USER=student POSTGRES_PASSWORD="
 
 vault_cmd auth enable kubernetes
 vault_cmd write auth/kubernetes/config kubernetes_host="https://kubernetes.default.svc:443"
-kubectl -n vault exec -i vault-0 -- env VAULT_TOKEN="$ROOT_TOKEN" vault policy write student-api-read - < k8s/vault/student-api-policy.hcl
+kubectl -n vault exec -i vault-0 -- env VAULT_TOKEN="$ROOT_TOKEN" vault policy write student-api-read - < helm/values/vault-student-api-policy.hcl
 vault_cmd write auth/kubernetes/role/student-api bound_service_account_names=eso-vault bound_service_account_namespaces=student-api policies=student-api-read ttl=1h
 ```
 
@@ -885,7 +888,7 @@ vault_cmd write auth/kubernetes/role/student-api bound_service_account_names=eso
 ### Step 5: Deploy the app
 
 ```bash
-make k8s-deploy
+make helm-deploy
 kubectl -n student-api get pods -o wide
 ```
 
@@ -928,16 +931,58 @@ Vault is always sealed after a restart, so run `make vault-unseal` every time.
 This keeps the database.
 
 ```bash
-kubectl -n student-api delete deployment student-api
+helm uninstall student-api -n student-api
 ```
 
-> **Warning:** do **not** run `kubectl delete -f k8s/student-api/application.yml` or `kubectl delete -f k8s/student-api/database.yml`. Both files contain the Namespace, so deleting them deletes **everything** in it, including the database.
->
-> Deleting the ExternalSecret also deletes the Secret `db-credentials`. ESO owns it (`creationPolicy: Owner`).
+The charts do not create the Namespace, so `helm uninstall` does not delete it.
+
+> **Warning:** deleting the ExternalSecret also deletes the Secret `db-credentials`. ESO owns it (`creationPolicy: Owner`).
 
 ### Rotate the database password
 
 > **TODO:** not covered yet. Changing the password in Vault alone does not change Postgres's password.
+
+### Helm operations
+
+List all releases:
+
+```bash
+helm list -A
+```
+
+Show the revision history of the API release:
+
+```bash
+helm history student-api -n student-api
+```
+
+Roll back to an earlier revision:
+
+```bash
+helm rollback student-api <REVISION> -n student-api --wait
+```
+
+Render the manifests without installing anything:
+
+```bash
+helm template student-api helm/student-api --set replicaCount=3
+```
+
+Change a setting and upgrade:
+
+```bash
+helm upgrade --install student-api helm/student-api -n student-api --set config.LOG_LEVEL=DEBUG --wait
+```
+
+The pods restart automatically because of the `checksum/config` annotation.
+
+Remove the app only:
+
+```bash
+helm uninstall student-api -n student-api
+```
+
+> **Note:** `helm uninstall postgres` keeps the PVC (annotation `helm.sh/resource-policy: keep`), so the data survives.
 
 ---
 
@@ -965,6 +1010,13 @@ kubectl -n student-api delete deployment student-api
 - **Vault is set up like a real service.** It runs in standalone mode with persistent storage (not dev mode). It uses Kubernetes auth, so no tokens are stored. The policy is read-only (least privilege).
 - **ESO instead of the Vault Secrets Operator.** ESO supports many providers (for example AWS Secrets Manager). Switching provider only changes the SecretStore.
 
+### Helm design decisions
+
+- **Own charts for the API and Postgres.** Community charts for Vault and ESO, vendored into `helm/` and pinned.
+- **One source of truth for the image version.** The image tag defaults to the chart `appVersion` and is overridden with `--set image.tag=$(VERSION)`.
+- **Charts do not create the Namespace.** Helm uses `--namespace` / `--create-namespace`. This fixes the old risk of deleting the namespace by deleting a manifest file.
+- **Standard `app.kubernetes.io` labels.** **TODO:** the rest of this bullet was cut off in the source text. Complete it.
+
 ---
 
 ## Kubernetes: known limitations
@@ -975,7 +1027,6 @@ This is a lab setup, not a production one.
 - **One unseal key is stored on the laptop.** Production uses several key shares or cloud KMS auto-unseal.
 - **The root token is used for the initial configuration.** Production would revoke it afterwards.
 - **The migration runs as an init container in every API pod** (required by the bootcamp). With two replicas, they can race on the first deploy. A Kubernetes Job is the cleaner pattern.
-- **The image tag `student-api:1.1.0` is written in two places:** `application.yml` and `VERSION` in the Makefile. Keep them in sync by hand. This is to be solved later with Helm templating.
 
 ---
 
