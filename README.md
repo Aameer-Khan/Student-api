@@ -25,7 +25,16 @@ This was built step by step as a learning project. The [Learning journey](#learn
 13. [Testing](#testing)
 14. [CI pipeline](#ci-pipeline)
 15. [Production deploy](#production-deploy)
-16. [Learning journey](#learning-journey)
+16. [Deploying on Kubernetes: overview](#deploying-on-kubernetes-overview)
+17. [Kubernetes: prerequisites](#kubernetes-prerequisites)
+18. [Kubernetes: repository layout](#kubernetes-repository-layout)
+19. [Kubernetes: Makefile targets](#kubernetes-makefile-targets)
+20. [Kubernetes: first-time setup](#kubernetes-first-time-setup)
+21. [Kubernetes: day-to-day operations](#kubernetes-day-to-day-operations)
+22. [Kubernetes: troubleshooting](#kubernetes-troubleshooting)
+23. [Kubernetes: design decisions](#kubernetes-design-decisions)
+24. [Kubernetes: known limitations](#kubernetes-known-limitations)
+25. [Learning journey](#learning-journey)
 
 ---
 
@@ -733,6 +742,240 @@ While `api1` is stopped, requests still succeed and every `X-Upstream` points at
 5. Creates `/home/ubuntu/BOOTSTRAP_DONE` when it has finished.
 
 It doesn't fetch the code or start anything. After the file appears, log in and run [Deploying](#deploying): clone the repository, create `deploy/.env` and run `make deploy`. This is a different script from `infra/runner-bootstrap.sh`, which prepares the [CI runner](#self-hosted-runner-on-ec2).
+
+---
+
+## Deploying on Kubernetes: overview
+
+The API and its Postgres database run on a local multi-node Kubernetes cluster, created with **kind**.
+
+Database credentials are **not** stored in Git and are **not** created by hand. They live in **HashiCorp Vault**. The **External Secrets Operator (ESO)** copies them into a Kubernetes Secret automatically.
+
+```
+kind cluster "student-api" (Kubernetes v1.37.0)
+├── control-plane node            (tainted: no app workloads)
+├── worker   label type=application         → namespace student-api: 2 API pods
+├── worker2  label type=database            → namespace student-api: 1 Postgres pod + 1Gi PVC
+└── worker3  label type=dependent_services  → namespace vault: Vault
+                                            → namespace external-secrets: ESO (3 pods)
+
+Secret flow:
+Vault KV path secret/student-api/db
+   → ESO logs in with Kubernetes auth (service account "eso-vault", role "student-api", read-only policy)
+   → ESO creates Kubernetes Secret "db-credentials" in namespace student-api
+   → Postgres and API pods read it as environment variables
+
+Traffic: your Mac localhost:8080 → kind port mapping → NodePort 30080 → Service "student-api" → API pods (port 5000)
+The database Service "db" is ClusterIP (internal only).
+```
+
+---
+
+## Kubernetes: prerequisites
+
+| Tool            | Notes                                                    |
+|-----------------|----------------------------------------------------------|
+| Docker Desktop  | Give it at least 8 GB of memory.                         |
+| kind            | Creates the cluster.                                     |
+| kubectl         | Talks to the cluster.                                    |
+| Helm            | Installs Vault and ESO.                                  |
+| jq              | Reads the Vault init file.                               |
+| openssl         | Generates the database password.                         |
+| Node.js         | Needed for `npx` / newman (`make smoke`).                |
+
+On macOS, install them with:
+
+```bash
+brew install kind kubernetes-cli helm jq node
+```
+
+Add the Helm repos once:
+
+```bash
+helm repo add hashicorp https://helm.releases.hashicorp.com
+helm repo add external-secrets https://charts.external-secrets.io
+helm repo update
+```
+
+---
+
+## Kubernetes: repository layout
+
+| Path | What it holds |
+|------|---------------|
+| [`infra/k8s/kind-config.yaml`](infra/k8s/kind-config.yaml) | kind cluster: 1 control plane + 3 labelled workers, pinned node image, port mapping host 8080 → node 30080 on the application worker. |
+| [`k8s/student-api/database.yml`](k8s/student-api/database.yml) | Namespace, ServiceAccount `eso-vault`, SecretStore `vault-backend`, ExternalSecret `db-credentials`, PVC `postgres-data`, Deployment `postgres` (Recreate strategy, nodeSelector `type=database`), Service `db` (ClusterIP). |
+| [`k8s/student-api/application.yml`](k8s/student-api/application.yml) | Namespace, ConfigMap `student-api-config` (`LOG_LEVEL`, `DB_HOST`, `DB_PORT`), Deployment `student-api` (2 replicas, nodeSelector `type=application`, init container `migrate` that runs `flask --app app db upgrade`, readiness probe HTTP `/healthcheck`, liveness probe TCP 5000, resource requests and limits), Service `student-api` (NodePort 30080). |
+| [`k8s/vault/values.yaml`](k8s/vault/values.yaml) | Helm values: standalone Vault, file storage on a 1Gi PVC, injector disabled, nodeSelector `type=dependent_services`. |
+| [`k8s/vault/student-api-policy.hcl`](k8s/vault/student-api-policy.hcl) | Vault policy: read-only on `secret/data/student-api/*`. |
+| [`k8s/external-secrets/values.yaml`](k8s/external-secrets/values.yaml) | Helm values: ESO controller, webhook and cert-controller on `type=dependent_services`. |
+
+---
+
+## Kubernetes: Makefile targets
+
+| Target              | What it does                                                                                  |
+|---------------------|-----------------------------------------------------------------------------------------------|
+| `make cluster-up`   | Creates the kind cluster from `infra/k8s/kind-config.yaml`. Skips if it already exists.       |
+| `make cluster-down` | Deletes the kind cluster.                                                                     |
+| `make docker-build` | Builds the API image `student-api:1.1.0`.                                                     |
+| `make k8s-platform` | Installs or upgrades Vault (chart 0.34.1) and ESO (chart 2.13.0) with Helm. Idempotent.       |
+| `make vault-unseal` | Unseals Vault using the key saved in `~/.vault-lab/init.json`.                                |
+| `make k8s-load`     | Copies the local image `student-api:1.1.0` into the kind nodes.                               |
+| `make k8s-deploy`   | Runs `k8s-load`, then `kubectl apply` on `database.yml` and `application.yml`.                |
+| `make smoke`        | Runs the Postman collection with Newman against `http://localhost:8080`.                      |
+
+---
+
+## Kubernetes: first-time setup
+
+Use these steps on a fresh cluster.
+
+### Step 1: Cluster and image
+
+```bash
+make cluster-up
+make docker-build
+```
+
+### Step 2: Vault and ESO
+
+```bash
+make k8s-platform
+kubectl -n vault get pods
+```
+
+`vault-0` shows `0/1` until it is unsealed. This is expected.
+
+### Step 3: Initialize and unseal Vault
+
+Do this once per new cluster.
+
+```bash
+mkdir -p ~/.vault-lab && chmod 700 ~/.vault-lab
+kubectl -n vault exec vault-0 -- vault operator init -key-shares=1 -key-threshold=1 -format=json > ~/.vault-lab/init.json
+chmod 600 ~/.vault-lab/init.json
+make vault-unseal
+kubectl -n vault exec vault-0 -- vault status
+```
+
+Expect `Sealed false` in the output of `vault status`.
+
+> **Warning:** `~/.vault-lab/init.json` contains the unseal key and the root token. Never commit or share it. If it is lost, Vault's data cannot be recovered.
+
+### Step 4: Configure Vault
+
+Do this once per new cluster. Run all of it in the same terminal.
+
+```bash
+ROOT_TOKEN=$(jq -r '.root_token' ~/.vault-lab/init.json)
+vault_cmd() { kubectl -n vault exec vault-0 -- env VAULT_TOKEN="$ROOT_TOKEN" vault "$@"; }
+
+vault_cmd secrets enable -path=secret kv-v2
+vault_cmd kv put secret/student-api/db POSTGRES_USER=student POSTGRES_PASSWORD="$(openssl rand -hex 16)" POSTGRES_DB=studentdb
+
+vault_cmd auth enable kubernetes
+vault_cmd write auth/kubernetes/config kubernetes_host="https://kubernetes.default.svc:443"
+kubectl -n vault exec -i vault-0 -- env VAULT_TOKEN="$ROOT_TOKEN" vault policy write student-api-read - < k8s/vault/student-api-policy.hcl
+vault_cmd write auth/kubernetes/role/student-api bound_service_account_names=eso-vault bound_service_account_namespaces=student-api policies=student-api-read ttl=1h
+```
+
+> **Note:** Postgres sets its password only when its data volume is first created. If the database already exists, the password in Vault must match the existing one. Do not generate a new one.
+
+### Step 5: Deploy the app
+
+```bash
+make k8s-deploy
+kubectl -n student-api get pods -o wide
+```
+
+### Step 6: Verify
+
+```bash
+kubectl -n student-api get secretstore,externalsecret
+curl -si http://localhost:8080/healthcheck | head -1
+make smoke
+```
+
+Expected results:
+
+| Command | Expect |
+|---------|--------|
+| `kubectl -n student-api get secretstore,externalsecret` | SecretStore `Valid`. ExternalSecret `SecretSynced`, READY `True`. |
+| `curl -si http://localhost:8080/healthcheck \| head -1` | `HTTP/1.1 200 OK` |
+| `make smoke` | 0 failures |
+
+---
+
+## Kubernetes: day-to-day operations
+
+### Pause
+
+Quit Docker Desktop. All data is kept.
+
+### Resume
+
+```bash
+docker start student-api-control-plane student-api-worker student-api-worker2 student-api-worker3
+make vault-unseal
+kubectl -n student-api get pods
+```
+
+Vault is always sealed after a restart, so run `make vault-unseal` every time.
+
+### Remove the API only
+
+This keeps the database.
+
+```bash
+kubectl -n student-api delete deployment student-api
+```
+
+> **Warning:** do **not** run `kubectl delete -f k8s/student-api/application.yml` or `kubectl delete -f k8s/student-api/database.yml`. Both files contain the Namespace, so deleting them deletes **everything** in it, including the database.
+>
+> Deleting the ExternalSecret also deletes the Secret `db-credentials`. ESO owns it (`creationPolicy: Owner`).
+
+### Rotate the database password
+
+> **TODO:** not covered yet. Changing the password in Vault alone does not change Postgres's password.
+
+---
+
+## Kubernetes: troubleshooting
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| `vault-0` is `0/1 Running` | Vault is sealed. | `make vault-unseal` |
+| ExternalSecret shows `SecretSyncedError` | Vault is sealed, or the path or permission is wrong. | `kubectl -n student-api describe externalsecret db-credentials` and read the Events. |
+| Pod shows `CreateContainerConfigError` | The Secret `db-credentials` is missing. | Check the ExternalSecret status. |
+| `ErrImageNeverPull` or `ImagePullBackOff` | The image is not in the kind nodes. | `make docker-build && make k8s-load` |
+| Port 8080 is already in use | The Docker Compose prod stack is running. | `make prod-down` |
+| An API pod shows 1 restart on the first deploy | Both replicas ran the migration init container at the same time. | Harmless. See [Kubernetes: known limitations](#kubernetes-known-limitations). |
+
+---
+
+## Kubernetes: design decisions
+
+- **kind instead of minikube.** The whole cluster is declared in one YAML file kept in Git.
+- **Control plane plus 3 labelled workers.** kind taints the control plane, so apps need their own nodes.
+- **Postgres is pinned to the database node.** Its disk (a local-path PVC) lives on that node.
+- **Recreate strategy for Postgres.** There are never two Postgres processes on one disk.
+- **Two different probes.** The liveness probe checks only the TCP port, so a database outage does not restart every API pod. The readiness probe checks `/healthcheck` and removes a pod from traffic when the database is unreachable.
+- **Settings in two places.** Non-secret settings are in a ConfigMap. `DATABASE_URL` is built from the Secret's variables, so the password lives in one place.
+- **Vault is set up like a real service.** It runs in standalone mode with persistent storage (not dev mode). It uses Kubernetes auth, so no tokens are stored. The policy is read-only (least privilege).
+- **ESO instead of the Vault Secrets Operator.** ESO supports many providers (for example AWS Secrets Manager). Switching provider only changes the SecretStore.
+
+---
+
+## Kubernetes: known limitations
+
+This is a lab setup, not a production one.
+
+- **Vault TLS is disabled** (`tls_disable = 1`). Production must use TLS.
+- **One unseal key is stored on the laptop.** Production uses several key shares or cloud KMS auto-unseal.
+- **The root token is used for the initial configuration.** Production would revoke it afterwards.
+- **The migration runs as an init container in every API pod** (required by the bootcamp). With two replicas, they can race on the first deploy. A Kubernetes Job is the cleaner pattern.
+- **The image tag `student-api:1.1.0` is written in two places:** `application.yml` and `VERSION` in the Makefile. Keep them in sync by hand. This is to be solved later with Helm templating.
 
 ---
 
