@@ -2,7 +2,7 @@ replicaCount: 2
 
 image:
   repository: docker.io/xilinx19/student-api
-  tag: "1.1.0-b4a2368"
+  tag: "1.1.0-c3cb15b"
   pullPolicy: IfNotPresent
 
 nodeSelector:
