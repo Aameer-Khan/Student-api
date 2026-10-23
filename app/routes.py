@@ -129,4 +129,4 @@ def update_student(student_id):
     logger.info("Updated student %s", student.id)
     return jsonify(student.to_dict()), 200
 
-
+# Student API routes — deployed via GitOps (ArgoCD)
