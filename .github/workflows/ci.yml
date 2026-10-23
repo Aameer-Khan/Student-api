@@ -17,49 +17,78 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-main
+  cancel-in-progress: false
+
+env:
+  IMAGE: docker.io/xilinx19/student-api
+
 jobs:
   ci:
-    runs-on: [self-hosted, ec2]
-    env:
-      AWS_REGION: us-east-1
-      ECR_REPOSITORY: student-api
+    runs-on: [self-hosted, cloud]
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
     steps:
-      - name: Check out the code
-        uses: actions/checkout@v5
+      - uses: actions/checkout@v5
 
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Build API
-        run: make build
+      - run: make build
+      - run: make lint
+      - run: make test
 
-      - name: Lint
-        run: make lint
+      - name: Compute image tag
+        id: meta
+        run: echo "tag=$(make -s version)-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
-      - name: Run tests
-        run: make test
+      - uses: docker/setup-buildx-action@v3
 
-      - name: Docker login to ECR
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push multi-arch image
         run: |
-          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text --region "$AWS_REGION")
-          REGISTRY="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
-          echo "REGISTRY=${REGISTRY}" >> "$GITHUB_ENV"
-          aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$REGISTRY"
-
-      - name: Docker build and push
-        run: |
-          TAG="$(make -s version)-${GITHUB_SHA::7}"
-          if OUTPUT=$(aws ecr describe-images --repository-name "$ECR_REPOSITORY" --image-ids imageTag="$TAG" --region "$AWS_REGION" 2>&1); then
-            echo "Image $TAG already exists in ECR, nothing to push"
+          TAG="${{ steps.meta.outputs.tag }}"
+          if docker buildx imagetools inspect "$IMAGE:$TAG" >/dev/null 2>&1; then
+            echo "$IMAGE:$TAG already exists, nothing to push"
             exit 0
-          elif echo "$OUTPUT" | grep -q ImageNotFoundException; then
-            echo "Image $TAG is not in ECR yet, building it"
-          else
-            echo "$OUTPUT"
-            exit 1
           fi
-          docker build -t "$REGISTRY/$ECR_REPOSITORY:$TAG" .
-          docker push "$REGISTRY/$ECR_REPOSITORY:$TAG"
-          echo "Pushed $REGISTRY/$ECR_REPOSITORY:$TAG"
+          docker buildx build --platform linux/amd64,linux/arm64 -t "$IMAGE:$TAG" --push .
+
+  update-helm:
+    needs: ci
+    runs-on: [self-hosted, cloud]
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: main
+
+      - name: Bump image in Helm values
+        env:
+          TAG: ${{ needs.ci.outputs.tag }}
+        run: |
+          sed -i -E "s|^(  repository:).*|\1 ${IMAGE}|" helm/student-api/values.yaml
+          sed -i -E "s|^(  tag:).*|\1 \"${TAG}\"|" helm/student-api/values.yaml
+          git diff
+
+      - name: Commit and push
+        env:
+          TAG: ${{ needs.ci.outputs.tag }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add helm/student-api/values.yaml
+          if git diff --cached --quiet; then
+            echo "Image tag already up to date"
+            exit 0
+          fi
+          git commit -m "chore(helm): bump student-api image to ${TAG} [skip ci]"
+          git pull --rebase origin main
+          git push origin HEAD:main
