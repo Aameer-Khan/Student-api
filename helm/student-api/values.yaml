@@ -1,8 +1,8 @@
 replicaCount: 3
 
 image:
-  repository: student-api
-  tag: "" # empty = use the chart's appVersion
+  repository: docker.io/xilinx19/student-api
+  tag: "1.1.0-b4a2368"
   pullPolicy: IfNotPresent
 
 nodeSelector:
