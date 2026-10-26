@@ -1,0 +1,4 @@
+fullnameOverride: blackbox-exporter
+
+nodeSelector:
+  type: dependent_services

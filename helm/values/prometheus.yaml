@@ -1,0 +1,39 @@
+server:
+  nodeSelector:
+    type: dependent_services
+  retention: 7d
+  persistentVolume:
+    enabled: true
+    size: 5Gi
+
+alertmanager:
+  enabled: false
+
+prometheus-pushgateway:
+  enabled: false
+
+kube-state-metrics:
+  nodeSelector:
+    type: dependent_services
+
+prometheus-node-exporter:
+  tolerations:
+  - operator: Exists
+
+extraScrapeConfigs: |
+  - job_name: blackbox-http
+    metrics_path: /probe
+    params:
+      module: [http_2xx]
+    static_configs:
+      - targets:
+          - http://student-api.student-api.svc/healthcheck
+          - http://argocd-server.argocd.svc/healthz
+          - http://vault.vault.svc:8200/v1/sys/health
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: blackbox-exporter.observability.svc:9115

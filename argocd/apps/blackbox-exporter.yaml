@@ -1,0 +1,5 @@
+  name: blackbox-exporter                       # metadata
+    path: helm/prometheus-blackbox-exporter     # source
+      releaseName: blackbox-exporter
+      valueFiles:
+        - ../values/blackbox-exporter.yaml
