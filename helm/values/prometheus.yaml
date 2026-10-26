@@ -22,6 +22,7 @@ prometheus-node-exporter:
 
 extraScrapeConfigs: |
   - job_name: blackbox-http
+    scrape_interval: 15s
     metrics_path: /probe
     params:
       module: [http_2xx]
