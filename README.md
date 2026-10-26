@@ -34,7 +34,8 @@ This was built step by step as a learning project. The [Learning journey](#learn
 22. [Kubernetes: troubleshooting](#kubernetes-troubleshooting)
 23. [Kubernetes: design decisions](#kubernetes-design-decisions)
 24. [Kubernetes: known limitations](#kubernetes-known-limitations)
-25. [Learning journey](#learning-journey)
+25. [GitOps deployment with ArgoCD](#gitops-deployment-with-argocd)
+26. [Learning journey](#learning-journey)
 
 ---
 
@@ -1027,6 +1028,145 @@ This is a lab setup, not a production one.
 - **One unseal key is stored on the laptop.** Production uses several key shares or cloud KMS auto-unseal.
 - **The root token is used for the initial configuration.** Production would revoke it afterwards.
 - **The migration runs as an init container in every API pod** (required by the bootcamp). With two replicas, they can race on the first deploy. A Kubernetes Job is the cleaner pattern.
+
+---
+
+## GitOps deployment with ArgoCD
+
+ArgoCD watches this Git repository and keeps the cluster in sync with it. The Helm charts and their `values.yaml` files in Git are the source of truth.
+
+A push to `main` runs CI, which builds an image and commits the new image tag to Git. ArgoCD sees that commit and rolls out the new image.
+
+### ArgoCD architecture
+
+| Path | What it is |
+|------|------------|
+| [`helm/argo-cd/`](helm/argo-cd/) | The ArgoCD chart, vendored, version 10.10.5. |
+| [`helm/values/argo-cd.yaml`](helm/values/argo-cd.yaml) | Our settings for that chart. |
+| [`argocd/bootstrap/repository.yaml`](argocd/bootstrap/repository.yaml) | Repository Secret. The repo is public. It has the label `argocd.argoproj.io/secret-type=repository`. |
+| [`argocd/bootstrap/root-app.yaml`](argocd/bootstrap/root-app.yaml) | Application `root`. It watches `argocd/apps` on branch `main`. |
+| [`argocd/apps/postgres.yaml`](argocd/apps/postgres.yaml) | Application that points at `helm/postgres`. |
+| [`argocd/apps/student-api.yaml`](argocd/apps/student-api.yaml) | Application that points at `helm/student-api`. |
+
+- **Where it runs.** ArgoCD runs in the namespace `argocd`, on the `dependent_services` node.
+- **Settings.** Dex and notifications are disabled. `server.insecure=true` (lab only).
+- **App of apps.** The `root` Application watches `argocd/apps`. Every Application file in that folder is created from there.
+- **The two apps.** `postgres` and `student-api` deploy into the namespace `student-api`. Both use `syncPolicy` automated with `prune` and `selfHeal`, and `CreateNamespace=true`.
+
+### CI/CD flow
+
+The workflow is [`.github/workflows/ci.yml`](.github/workflows/ci.yml). It runs only on a `push` to `main` (path-filtered) and on manual dispatch.
+
+```
+git push to main
+ → job "ci"           make build, lint, test
+                      build a multi-arch image, push it to docker.io/xilinx19/student-api:<VERSION>-<short sha>
+ → job "update-helm"  set image.repository and image.tag in helm/student-api/values.yaml
+                      commit "chore(helm): bump student-api image to <tag> [skip ci]", push to main
+ → ArgoCD             polls Git (about every 3 minutes), syncs, rolls the pods
+```
+
+#### Job `ci`
+
+| Item | Value |
+|------|-------|
+| Runner | Self-hosted, labels `self-hosted` and `cloud`. An Ubuntu 22.04 x86_64 cloud server prepared with [`infra/runner-bootstrap-ubuntu22.sh`](infra/runner-bootstrap-ubuntu22.sh). |
+| Checks | `make build`, `make lint`, `make test` |
+| Image tag | `<VERSION>-<short sha>` |
+| Build | Multi-arch (`linux/amd64`, `linux/arm64`) with buildx |
+| Push to | `docker.io/xilinx19/student-api`. Skipped if the tag already exists. |
+
+#### Job `update-helm`
+
+- It is the only job with `contents: write`.
+- It checks out the latest `main`.
+- It sets `image.repository` and `image.tag` in `helm/student-api/values.yaml`.
+- It commits with the message `chore(helm): bump student-api image to <tag> [skip ci]` and pushes.
+
+#### After the push
+
+ArgoCD polls Git about every 3 minutes and syncs. The pods are replaced with a rolling update, so there is no downtime.
+
+#### Loop prevention
+
+The bot commit must not start CI again. Three things stop that:
+
+- `helm/` is not in the CI path filter.
+- Commits made with `GITHUB_TOKEN` do not trigger workflows.
+- The commit message contains `[skip ci]`.
+
+#### Secrets
+
+| GitHub secret | What it is |
+|---------------|------------|
+| `DOCKERHUB_USERNAME` | The Docker Hub user name. |
+| `DOCKERHUB_TOKEN` | A Docker Hub access token with read and write permission. |
+
+> **Note:** this flow differs from the [CI pipeline](#ci-pipeline) section above, which describes pushing to Amazon ECR from an EC2 runner. **TODO:** update or remove that section.
+
+### ArgoCD setup steps
+
+**1. Add the Helm repo.** This is only needed to re-vendor the chart.
+
+```bash
+helm repo add argo https://argoproj.github.io/argo-helm
+```
+
+**2. Install ArgoCD.**
+
+```bash
+helm install argocd ./helm/argo-cd -n argocd --create-namespace -f helm/values/argo-cd.yaml --wait
+```
+
+**3. Apply the bootstrap files.** This is the only manual apply.
+
+```bash
+kubectl apply -f argocd/bootstrap/
+```
+
+**4. Get the admin password.**
+
+```bash
+kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d
+```
+
+**5. Open the UI.**
+
+```bash
+kubectl -n argocd port-forward svc/argocd-server 8081:80
+```
+
+Then open `http://localhost:8081`. The user is `admin`.
+
+**6. Set up the self-hosted runner.**
+
+1. Run `infra/runner-bootstrap-ubuntu22.sh` with `sudo`.
+2. Log in again.
+3. On GitHub, go to **Settings → Actions → Runners** and register the runner with `--name cloud-runner --labels cloud`.
+4. Install it as a service:
+
+   ```bash
+   sudo ./svc.sh install cloud_user
+   sudo ./svc.sh start
+   ```
+
+### Operating rules
+
+- **Change things by committing to Git.** Never use `kubectl` or `helm` on the cluster to change the apps. `selfHeal` reverts manual changes.
+- **Always `git pull` before you push.** The CI bot commits to `main`.
+- **Rollback is a `git revert`.** Revert the bot's tag commit. ArgoCD then deploys the previous image.
+- **Security.** The self-hosted runner never runs `pull_request` workflows. Workflows from fork pull requests require approval. The runner runs as a non-root user.
+- **After a reboot of the runner server,** run this again:
+
+  ```bash
+  docker run --privileged --rm tonistiigi/binfmt --install arm64
+  ```
+
+### GitOps limitations
+
+- **Git is polled.** There is no webhook, because GitHub cannot reach a laptop cluster.
+- **The ArgoCD UI is reached by port-forward.**
+- **TLS is disabled in the lab.**
 
 ---
 

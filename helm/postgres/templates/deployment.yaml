@@ -45,7 +45,30 @@ spec:
             exec:
               command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]
             initialDelaySeconds: 5
-            periodSeconds: 5
+            periodSeconds: 5  
+        {{- if .Values.exporter.enabled }}
+        - name: postgres-exporter
+          image: "{{ .Values.exporter.image.repository }}:{{ .Values.exporter.image.tag }}"
+          ports:
+            - name: metrics
+              containerPort: 9187
+          envFrom:
+            - secretRef:
+                name: {{ .Values.credentials.secretName }}
+          env:
+            - name: DATA_SOURCE_URI
+              value: "localhost:5432/$(POSTGRES_DB)?sslmode=disable"
+            - name: DATA_SOURCE_USER
+              value: "$(POSTGRES_USER)"
+            - name: DATA_SOURCE_PASS
+              value: "$(POSTGRES_PASSWORD)"
+          resources:
+            requests:
+              cpu: 20m
+              memory: 32Mi
+            limits:
+              memory: 64Mi
+        {{- end }}
       volumes:
         - name: data
           persistentVolumeClaim:
