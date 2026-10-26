@@ -1,5 +1,24 @@
-  name: blackbox-exporter                       # metadata
-    path: helm/prometheus-blackbox-exporter     # source
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: blackbox-exporter
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/Aameer-Khan/Student-api.git
+    targetRevision: main
+    path: helm/prometheus-blackbox-exporter
+    helm:
       releaseName: blackbox-exporter
       valueFiles:
-        - ../values/blackbox-exporter.yaml
+      - ../values/blackbox-exporter.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: observability
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+    - CreateNamespace=true
