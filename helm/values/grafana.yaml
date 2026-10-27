@@ -1,0 +1,64 @@
+nodeSelector:
+  type: dependent_services
+
+persistence:
+  enabled: true
+  size: 1Gi
+
+admin:
+  existingSecret: grafana-admin
+  userKey: admin-user
+  passwordKey: admin-password
+
+datasources:
+  datasources.yaml:
+    apiVersion: 1
+    datasources:
+    - name: Prometheus
+      type: prometheus
+      uid: prometheus
+      url: http://prometheus-server.observability.svc
+      access: proxy
+      isDefault: true
+    - name: Loki
+      type: loki
+      uid: loki
+      url: http://loki.observability.svc:3100
+      access: proxy
+
+extraObjects:
+- apiVersion: v1
+  kind: ServiceAccount
+  metadata:
+    name: eso-vault
+- apiVersion: external-secrets.io/v1
+  kind: SecretStore
+  metadata:
+    name: vault-backend
+  spec:
+    provider:
+      vault:
+        server: http://vault.vault.svc.cluster.local:8200
+        path: secret
+        version: v2
+        auth:
+          kubernetes:
+            mountPath: kubernetes
+            role: observability
+            serviceAccountRef:
+              name: eso-vault
+- apiVersion: external-secrets.io/v1
+  kind: ExternalSecret
+  metadata:
+    name: grafana-admin
+  spec:
+    refreshInterval: 1h
+    secretStoreRef:
+      name: vault-backend
+      kind: SecretStore
+    target:
+      name: grafana-admin
+      creationPolicy: Owner
+    dataFrom:
+    - extract:
+        key: observability/grafana
