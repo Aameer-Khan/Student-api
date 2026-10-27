@@ -40,12 +40,12 @@ spec:
             - name: data
               mountPath: /var/lib/postgresql/data
           readinessProbe:
-            resources:
-              {{- toYaml .Values.resources | nindent 12 }}
             exec:
               command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]
             initialDelaySeconds: 5
-            periodSeconds: 5  
+            periodSeconds: 5
+          resources:
+              {{- toYaml .Values.resources | nindent 12 }}  
         {{- if .Values.exporter.enabled }}
         - name: postgres-exporter
           image: "{{ .Values.exporter.image.repository }}:{{ .Values.exporter.image.tag }}"
