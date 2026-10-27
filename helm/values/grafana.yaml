@@ -62,3 +62,236 @@ extraObjects:
     dataFrom:
     - extract:
         key: observability/grafana
+dashboardProviders:
+  dashboardproviders.yaml:
+    apiVersion: 1
+    providers:
+    - name: default
+      orgId: 1
+      folder: ""
+      type: file
+      disableDeletion: true
+      editable: true
+      options:
+        path: /var/lib/grafana/dashboards/default
+
+dashboards:
+  default:
+    student-api-overview:
+      json: |
+        {
+          "uid": "student-api-overview",
+          "title": "Student API overview",
+          "tags": [
+            "student-api"
+          ],
+          "timezone": "browser",
+          "schemaVersion": 39,
+          "refresh": "30s",
+          "time": {
+            "from": "now-1h",
+            "to": "now"
+          },
+          "panels": [
+            {
+              "id": 1,
+              "type": "stat",
+              "title": "Endpoint up",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "gridPos": {
+                "x": 0,
+                "y": 0,
+                "w": 12,
+                "h": 8
+              },
+              "targets": [
+                {
+                  "refId": "A",
+                  "datasource": {
+                    "type": "prometheus",
+                    "uid": "prometheus"
+                  },
+                  "expr": "probe_success",
+                  "legendFormat": "{{instance}}"
+                }
+              ],
+              "fieldConfig": {
+                "defaults": {
+                  "mappings": [
+                    {
+                      "type": "value",
+                      "options": {
+                        "0": {
+                          "text": "DOWN",
+                          "color": "red"
+                        },
+                        "1": {
+                          "text": "UP",
+                          "color": "green"
+                        }
+                      }
+                    }
+                  ],
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "color": "red",
+                        "value": null
+                      },
+                      {
+                        "color": "green",
+                        "value": 1
+                      }
+                    ]
+                  },
+                  "color": {
+                    "mode": "thresholds"
+                  }
+                },
+                "overrides": []
+              },
+              "options": {
+                "colorMode": "background",
+                "graphMode": "none",
+                "textMode": "value_and_name",
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                }
+              }
+            },
+            {
+              "id": 2,
+              "type": "timeseries",
+              "title": "Requests by status (from logs)",
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              },
+              "gridPos": {
+                "x": 12,
+                "y": 0,
+                "w": 12,
+                "h": 8
+              },
+              "targets": [
+                {
+                  "refId": "A",
+                  "datasource": {
+                    "type": "loki",
+                    "uid": "loki"
+                  },
+                  "expr": "sum by (status) (rate({app=\"student-api\"} | pattern `<_> - - [<_>] \"<method> <path> <_>\" <status> <_>` [5m]))",
+                  "legendFormat": "{{status}}"
+                }
+              ],
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "reqps"
+                },
+                "overrides": []
+              }
+            },
+            {
+              "id": 3,
+              "type": "timeseries",
+              "title": "Probe latency",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "gridPos": {
+                "x": 0,
+                "y": 8,
+                "w": 12,
+                "h": 8
+              },
+              "targets": [
+                {
+                  "refId": "A",
+                  "datasource": {
+                    "type": "prometheus",
+                    "uid": "prometheus"
+                  },
+                  "expr": "probe_duration_seconds",
+                  "legendFormat": "{{instance}}"
+                }
+              ],
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "s"
+                },
+                "overrides": []
+              }
+            },
+            {
+              "id": 4,
+              "type": "timeseries",
+              "title": "Postgres connections",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "gridPos": {
+                "x": 12,
+                "y": 8,
+                "w": 12,
+                "h": 8
+              },
+              "targets": [
+                {
+                  "refId": "A",
+                  "datasource": {
+                    "type": "prometheus",
+                    "uid": "prometheus"
+                  },
+                  "expr": "pg_stat_database_numbackends{datname=\"studentdb\"}",
+                  "legendFormat": "open connections"
+                }
+              ],
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "short"
+                },
+                "overrides": []
+              }
+            },
+            {
+              "id": 5,
+              "type": "logs",
+              "title": "Application logs",
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              },
+              "gridPos": {
+                "x": 0,
+                "y": 16,
+                "w": 24,
+                "h": 10
+              },
+              "targets": [
+                {
+                  "refId": "A",
+                  "datasource": {
+                    "type": "loki",
+                    "uid": "loki"
+                  },
+                  "expr": "{app=\"student-api\"}"
+                }
+              ],
+              "options": {
+                "showTime": true,
+                "wrapLogMessage": true,
+                "sortOrder": "Descending"
+              }
+            }
+          ]
+        }
