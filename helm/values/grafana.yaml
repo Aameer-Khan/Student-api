@@ -4,6 +4,8 @@ nodeSelector:
 persistence:
   enabled: true
   size: 1Gi
+initChownData:
+  enabled: false
 
 admin:
   existingSecret: grafana-admin
