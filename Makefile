@@ -1,4 +1,4 @@
-.PHONY: install migrate run test db-up db-migrate docker-build docker-run down version prod-build prod-db prod-migrate deploy prod-ps prod-down prod-stop prod-start prod-logs smoke cluster-up cluster-down k8s-load k8s-deploy vault-unseal k8s-platform helm-lint helm-platform helm-deploy
+.PHONY: install migrate run test db-up db-migrate docker-build docker-run down version prod-build prod-db prod-migrate deploy prod-ps prod-down prod-stop prod-start prod-logs smoke cluster-up cluster-down k8s-load k8s-deploy vault-unseal k8s-platform helm-lint helm-platform helm-deploy lab-up ports
 
 VENV:= .venv
 PYTHON := $(VENV)/bin/python
@@ -105,3 +105,19 @@ helm-platform:
 helm-deploy: helm-lint k8s-load
 	helm upgrade --install postgres helm/postgres -n student-api --create-namespace --wait
 	helm upgrade --install student-api helm/student-api -n student-api --set image.tag=$(VERSION) --wait
+
+lab-up:
+	docker start student-api-control-plane student-api-worker student-api-worker2 student-api-worker3
+	kubectl wait --for=condition=Ready nodes --all --timeout=180s
+	kubectl -n vault wait --for=jsonpath='{.status.phase}'=Running pod/vault-0 --timeout=180s
+	$(MAKE) vault-unseal
+	kubectl -n student-api annotate externalsecret db-credentials force-sync=$$(date +%s) --overwrite
+	kubectl -n observability annotate externalsecret grafana-admin force-sync=$$(date +%s) --overwrite
+	kubectl -n argocd get applications
+
+ports:
+	@trap 'kill 0' INT; \
+	kubectl -n argocd port-forward svc/argocd-server 8081:80 & \
+	kubectl -n observability port-forward svc/prometheus-server 9090:80 & \
+	kubectl -n observability port-forward svc/grafana 3000:80 & \
+	wait
