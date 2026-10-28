@@ -35,7 +35,8 @@ This was built step by step as a learning project. The [Learning journey](#learn
 23. [Kubernetes: design decisions](#kubernetes-design-decisions)
 24. [Kubernetes: known limitations](#kubernetes-known-limitations)
 25. [GitOps deployment with ArgoCD](#gitops-deployment-with-argocd)
-26. [Learning journey](#learning-journey)
+26. [Observability stack (milestone 10)](#observability-stack-milestone-10)
+27. [Learning journey](#learning-journey)
 
 ---
 
@@ -1167,6 +1168,144 @@ Then open `http://localhost:8081`. The user is `admin`.
 - **Git is polled.** There is no webhook, because GitHub cannot reach a laptop cluster.
 - **The ArgoCD UI is reached by port-forward.**
 - **TLS is disabled in the lab.**
+
+---
+
+## Observability stack (milestone 10)
+
+Metrics, logs and dashboards for the cluster and the API. Everything runs in the namespace `observability`, on the `dependent_services` node. ArgoCD deploys it from vendored Helm charts in `helm/`. Our settings are in `helm/values/`.
+
+### Observability architecture
+
+| Component | Chart version | Chart in Git | Settings | ArgoCD app |
+|-----------|---------------|--------------|----------|------------|
+| Prometheus | 29.38.2 | [`helm/prometheus/`](helm/prometheus/) | [`helm/values/prometheus.yaml`](helm/values/prometheus.yaml) | [`argocd/apps/prometheus.yaml`](argocd/apps/prometheus.yaml) |
+| Blackbox exporter | 11.20.2 | [`helm/prometheus-blackbox-exporter/`](helm/prometheus-blackbox-exporter/) | [`helm/values/blackbox-exporter.yaml`](helm/values/blackbox-exporter.yaml) | [`argocd/apps/blackbox-exporter.yaml`](argocd/apps/blackbox-exporter.yaml) |
+| Postgres exporter | 0.2.1 (our `helm/postgres` chart) | [`helm/postgres/`](helm/postgres/) | in the chart | [`argocd/apps/postgres.yaml`](argocd/apps/postgres.yaml) |
+| Loki | 7.5.0 | [`helm/loki/`](helm/loki/) | [`helm/values/loki.yaml`](helm/values/loki.yaml) | [`argocd/apps/loki.yaml`](argocd/apps/loki.yaml) |
+| Promtail | 6.17.1 | [`helm/promtail/`](helm/promtail/) | [`helm/values/promtail.yaml`](helm/values/promtail.yaml) | [`argocd/apps/promtail.yaml`](argocd/apps/promtail.yaml) |
+| Grafana | 10.5.15 | [`helm/grafana/`](helm/grafana/) | [`helm/values/grafana.yaml`](helm/values/grafana.yaml) | [`argocd/apps/grafana.yaml`](argocd/apps/grafana.yaml) |
+
+#### Prometheus
+
+Chart `prometheus-community/prometheus`.
+
+- The server has a 5Gi PVC and 7-day retention.
+- kube-state-metrics is included.
+- node-exporter runs as a DaemonSet on all 4 nodes. It tolerates the control-plane taint.
+- Alertmanager and Pushgateway are disabled.
+- The Blackbox probes are scraped every 15 seconds.
+
+#### Blackbox exporter
+
+The release is named `blackbox-exporter` (`fullnameOverride`). It uses the module `http_2xx` and probes three targets:
+
+| Target | Note |
+|--------|------|
+| `http://student-api.student-api.svc/healthcheck` | The API. |
+| `http://argocd-server.argocd.svc/healthz` | ArgoCD. |
+| `http://vault.vault.svc:8200/v1/sys/health` | Vault. It returns 503 when Vault is sealed. |
+
+#### Postgres exporter
+
+The exporter is a sidecar in our own `helm/postgres` chart (version 0.2.1).
+
+- Image: `quay.io/prometheuscommunity/postgres-exporter:v0.17.1`.
+- It reaches the database on `localhost:5432`, with the `db-credentials` Secret.
+- Prometheus finds it automatically through the pod annotations `prometheus.io/scrape` and `prometheus.io/port=9187`.
+- The Postgres container also has resource requests and limits (QoS Burstable).
+
+#### Loki
+
+Loki runs in SingleBinary mode, with filesystem storage on a 5Gi PVC.
+
+#### Promtail
+
+Promtail runs as a DaemonSet on the application node only.
+
+- It keeps only logs from the namespace `student-api` with the label `app.kubernetes.io/name=student-api`.
+- It drops lines that contain `GET /healthcheck`.
+
+> **Note:** Promtail is end-of-life upstream. Grafana Alloy is its replacement.
+
+#### Grafana
+
+- Two provisioned data sources: Prometheus (uid `prometheus`) and Loki (uid `loki`).
+- The dashboard "Student API overview" is stored as code in [`helm/values/grafana.yaml`](helm/values/grafana.yaml).
+- The admin password comes from Vault, path `secret/observability/grafana`, through the ExternalSecret `grafana-admin`. It uses the Vault role `observability` and the policy [`helm/values/vault-observability-policy.hcl`](helm/values/vault-observability-policy.hcl).
+- `init-chown-data` is disabled.
+
+### One-time Vault setup for Grafana
+
+Do this after the main Vault setup.
+
+```bash
+vault kv put secret/observability/grafana admin-user=admin admin-password=<random>
+vault policy write observability-read helm/values/vault-observability-policy.hcl
+vault write auth/kubernetes/role/observability \
+  bound_service_account_names=eso-vault \
+  bound_service_account_namespaces=observability \
+  policies=observability-read \
+  ttl=1h
+```
+
+Replace `<random>` with a generated password. Never commit it.
+
+> **TODO:** these are written as plain `vault` commands. In this lab Vault runs in the pod `vault-0`. Run them the same way as in [Step 4: Configure Vault](#step-4-configure-vault), and feed the policy file on stdin as the `student-api-read` policy is done there.
+
+### Daily use
+
+| Command | What it does |
+|---------|--------------|
+| `make lab-up` | Starts the kind nodes, waits for them, unseals Vault and force-syncs both ExternalSecrets. |
+| `make ports` | Opens port-forwards: ArgoCD on `http://localhost:8081`, Prometheus on `http://localhost:9090`, Grafana on `http://localhost:3000`. |
+
+To read the Grafana admin password:
+
+```bash
+kubectl -n observability get secret grafana-admin -o jsonpath='{.data.admin-password}' | base64 -d
+```
+
+### Useful queries
+
+**PromQL** (in Prometheus or Grafana):
+
+```
+probe_success
+probe_duration_seconds
+pg_up
+pg_stat_database_numbackends{datname="studentdb"}
+sum by (pod) (kube_pod_container_status_restarts_total{namespace="student-api"})
+```
+
+**LogQL** (in Grafana, data source Loki):
+
+```
+{app="student-api"}
+{app="student-api"} |= "Deleted"
+```
+
+Requests by status, from the access logs:
+
+```
+sum by (status) (rate({app="student-api"} |= "HTTP/" | pattern `<_> - - [<_>] "<method> <path> <_>" <status> <_>` [5m]))
+```
+
+### Validating chart changes
+
+Run this before you push a chart change:
+
+```bash
+helm template <release> helm/<chart> -n <namespace> -f helm/values/<file>.yaml | kubectl apply --dry-run=server -f -
+```
+
+### Observability limitations
+
+- **TLS is off** in the lab.
+- **Vault must be unsealed after every restart.**
+- **The app exposes no `/metrics` endpoint yet.** Request metrics are derived from logs.
+- **Logs are plain text, not JSON.**
+- **The Postgres exporter uses the application's database user** instead of a dedicated `pg_monitor` user.
 
 ---
 
